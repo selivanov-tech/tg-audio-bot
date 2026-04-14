@@ -1,0 +1,41 @@
+# fly.toml — production config for the tg-audio-bot Telegram bot.
+# See https://fly.io/docs/reference/configuration/
+#
+# Deploy:  flyctl deploy --remote-only -c .infra/prod/fly.toml
+# Build context is the repo root, so all [build] paths are relative to there.
+
+app = 'tg-audio-bot'
+primary_region = 'fra'
+
+[build]
+  dockerfile = 'Dockerfile'
+  ignorefile = '.dockerignore'
+  [build.args]
+    GO_VERSION = '1.26'
+
+[env]
+  PORT = '8080'
+  MEDIABOT_TEMP_DIR = '/tmp/mediabot'
+  MEDIABOT_MAX_CONCURRENT_DOWNLOADS = '3'
+  YTDLP_PATH = '/usr/local/bin/yt-dlp'
+
+# Long-polling bot with an in-memory per-user queue:
+# machine must stay up and must not auto-stop.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = '15s'
+    interval = '30s'
+    method = 'GET'
+    timeout = '5s'
+    path = '/health'
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1

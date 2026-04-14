@@ -1,4 +1,26 @@
+# Project-specific
 plan.md
 .env
+.env.*
+!.env.example
 /media-bot
 /mediabot-temp/
+
+# Go build artifacts
+*.exe
+*.test
+*.out
+/dist/
+/bin/
+coverage.out
+coverage.html
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
