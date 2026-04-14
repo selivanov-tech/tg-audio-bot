@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rag-brothers/media-bot/internal/mediabot/application"
+	"github.com/rag-brothers/media-bot/internal/mediabot/application/port"
 	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
 	"github.com/rag-brothers/media-bot/internal/mediabot/infrastructure/config"
 	"github.com/rag-brothers/media-bot/internal/mediabot/infrastructure/provider/youtube"
@@ -20,6 +22,12 @@ import (
 )
 
 func main() {
+	// Structured text logs — human-readable in Fly's log UI, grep-friendly.
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -56,16 +64,28 @@ func main() {
 		log.Fatalf("telegram: %v", err)
 	}
 
-	svc := application.NewService(registry, bot, cfg.TempDir, cfg.MaxConcurrentDownload)
-	handler = application.NewHandler(svc, bot)
+	svc := application.NewService(registry, bot, cfg.TempDir, cfg.MaxConcurrentDownload, logger)
+	handler = application.NewHandler(svc, bot, logger)
 
-	log.Printf("media-bot starting: max_concurrent=%d temp_dir=%s", cfg.MaxConcurrentDownload, cfg.TempDir)
+	// Register the Russian "/" command menu. Best-effort: log the error but
+	// don't fail startup — the bot still works without the menu hints.
+	if err := bot.SetCommands(ctx, []port.Command{
+		{Command: "start", Description: "Помощь и примеры"},
+		{Command: "help", Description: "Как пользоваться ботом"},
+		{Command: "download", Description: "Скачать с именем файла"},
+	}); err != nil {
+		slog.Warn("set commands failed", "err", err)
+	}
+
+	slog.Info("media-bot starting",
+		"max_concurrent", cfg.MaxConcurrentDownload,
+		"temp_dir", cfg.TempDir)
 	bot.Start(ctx)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = healthSrv.Shutdown(shutdownCtx)
-	log.Printf("media-bot shutdown")
+	slog.Info("media-bot shutdown")
 }
 
 // startHealthServer launches a minimal HTTP server on $PORT (default 8080)
@@ -89,9 +109,9 @@ func startHealthServer(ctx context.Context) *http.Server {
 	}
 
 	go func() {
-		log.Printf("health server listening on :%s", port)
+		slog.Info("health server listening", "port", port)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("health server: %v", err)
+			slog.Error("health server", "err", err)
 		}
 	}()
 

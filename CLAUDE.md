@@ -44,11 +44,11 @@ These are easy to get wrong without reading multiple files together:
 
 2. **Progress throttling lives in the service, not the provider.** The YouTube provider calls the `OnProgress` callback on *every* matched stderr line. The application service throttles edits to the Telegram message to at most one per 2 seconds, and always forwards the final 100% line. If you add throttling inside a provider, you break this contract.
 
-3. **Queue is per-user with a global cap.** Each `chatID` gets its own sequential worker goroutine (lazy-spawned on enqueue, exits when the user's queue drains). A global semaphore (`MEDIABOT_MAX_CONCURRENT_DOWNLOADS`, default 3) gates *active* downloads across all users. So user A's third URL waits for A's second, AND at most 3 downloads run concurrently workspace-wide.
+3. **Queue is per-user with a global cap.** Each `chatID` gets its own sequential worker goroutine (lazy-spawned on enqueue, exits when the user's queue drains). A global semaphore (`MEDIABOT_MAX_CONCURRENT_DOWNLOADS`, default 3) gates *active* downloads across all users. So user A's third URL waits for A's second, AND at most 3 downloads run concurrently workspace-wide. A separate hard-coded semaphore (`maxConcurrentFetchInfo`, 2) gates `FetchInfo` calls — each yt-dlp probe is ~70 MB RSS and the download queue does not cover them, so without this gate a user flooding URLs OOM-kills the 512 MB Fly VM.
 
 4. **`Download` is a state machine.** States: `AwaitingQuality → Queued → Downloading → Sending → Complete` (or `Failed`). Transitions go through `MarkQueued()`, `MarkDownloading()`, etc., which return `ErrInvalidState` on illegal moves. Don't mutate state fields directly.
 
-5. **Telegram 50MB file limit is a hard constraint.** The service checks file size after download and surfaces a user-facing error suggesting Good (MP3) quality when Best (opus) exceeds the limit. This is a default-Bot-API assumption; a local Bot API server would lift it to 2GB (out of scope).
+5. **Telegram 50MB file limit is a hard constraint.** The service checks file size after download and surfaces a user-facing error suggesting Good (MP3) quality when Best (M4A/AAC) exceeds the limit. This is a default-Bot-API assumption; a local Bot API server would lift it to 2GB (out of scope). Note: we deliberately do NOT use opus — Telegram classifies `.opus` uploads as voice messages, which some users block via privacy settings (`VOICE_MESSAGES_FORBIDDEN`).
 
 6. **Domain errors are exhaustive.** `ErrUnsupportedURL` covers both "we don't support this domain" and "no provider matched" — do not introduce a separate `ErrNoProviderFound`.
 
@@ -73,7 +73,7 @@ Production runs on Fly.io. Layout mirrors `<redacted-local-path>`:
 
 - `.infra/prod/Dockerfile` — two-stage build. `golang:1.26-bookworm` → `debian:bookworm-slim` with `ffmpeg`, `python3`, and a pinned `yt-dlp` binary (ARG `YTDLP_VERSION`). Bump the version arg when yt-dlp breaks on YouTube changes.
 - `.infra/prod/fly.toml` — app `<fly-app>`, region `fra`, 512MB shared-cpu-1x. `auto_stop_machines = false` and `min_machines_running = 1` because the per-user queue is in-memory and cannot survive suspension. Health check hits `/health` every 30s.
-- `.infra/prod/fly/entrypoint.sh` — runs every `/opt/fly/scripts/*.sh` hook then execs `media-bot`. Drop shell scripts into `.infra/prod/fly/scripts/` to extend (e.g. write cookies from a secret).
+- `.infra/prod/fly/entrypoint.sh` — **sources** every `/opt/fly/scripts/*.sh` hook (so hooks can export env vars that reach `media-bot`), then execs the binary. Drop shell scripts into `.infra/prod/fly/scripts/` to extend; see the cookies runbook below for an example.
 - `.github/workflows/deploy.yml` — manual `workflow_dispatch` only. Runs `go vet` + `golangci-lint` + `go test ./internal/mediabot/...` before `flyctl deploy`, then smoke-checks `/health`.
 - `cmd/media-bot/main.go` serves `GET /health` on `$PORT` (default 8080) alongside the polling loop so Fly's HTTP check can pass.
 
@@ -81,13 +81,42 @@ Paths in `[build]` (`dockerfile`, `ignorefile`) are relative to `fly.toml`'s dir
 
 Fly config is always outside the default location, so every `flyctl` command for this app needs `-c .infra/prod/fly.toml` (except `-a <fly-app>` commands like `logs`/`ssh`).
 
+### Cookies runbook (yt-dlp)
+
+Cookies are needed for age- or region-restricted YouTube videos. Plumbing:
+
+- `.infra/prod/fly/scripts/01-cookies.sh` — sourced by `entrypoint.sh` at boot. If `YTDLP_COOKIES` env is set, it base64-decodes the value to `/tmp/yt-cookies.txt` (mode 600) and exports `YTDLP_COOKIES_PATH`. No-op when the secret is unset, so the bot runs fine without cookies.
+- Path is tmpfs — re-materialized on every boot from the Fly secret. No volume needed.
+
+Enable:
+```sh
+# Export cookies.txt from a browser (Netscape format), then:
+flyctl secrets set YTDLP_COOKIES="$(base64 -i cookies.txt | tr -d '\n')" -c .infra/prod/fly.toml
+# Linux alternative: base64 -w0 cookies.txt
+```
+Setting the secret triggers an auto-redeploy.
+
+Verify on the VM:
+```sh
+make ssh
+  env | grep YTDLP_COOKIES_PATH     # → /tmp/yt-cookies.txt
+  head -n 3 /tmp/yt-cookies.txt     # → Netscape header line
+```
+
+Disable / rotate:
+```sh
+flyctl secrets unset YTDLP_COOKIES -c .infra/prod/fly.toml
+# to rotate, just re-run `secrets set` with a fresh cookies.txt
+```
+
+`cookies.txt` is gitignored — safe to keep in the repo root while setting the secret.
+
 ### Open deployment items
 
 1. **First-boot grace period is 15s.** The bot currently boots in ~4s so this is fine, but if startup grows (eager Telegram API call, DB, etc.) bump `grace_period` in `fly.toml`.
-2. **Cookies plumbing is not wired.** `YTDLP_COOKIES_PATH` config exists in code but no secret is set on Fly. When an age-restricted video fails, add a Fly secret `YTDLP_COOKIES` and a `fly/scripts/01-cookies.sh` hook that writes it to a path referenced by `YTDLP_COOKIES_PATH`. A volume is needed if cookies should persist across restarts.
-3. **No persistent volume.** In-flight downloads are lost on every redeploy. Acceptable per `plan.md`; users can re-send URLs.
-4. **`GO_VERSION` build arg vs `go.mod`.** Both say `1.26`. If `go.mod` bumps, bump the arg in `.infra/prod/fly.toml` at the same time.
-5. **CI token rotation.** `FLY_API_TOKEN` in GitHub secrets is scoped to the current Fly app. If the app is ever destroyed/recreated, re-issue with `flyctl tokens create deploy -c .infra/prod/fly.toml` and update the secret.
+2. **No persistent volume.** In-flight downloads are lost on every redeploy. Acceptable per `plan.md`; users can re-send URLs.
+3. **`GO_VERSION` build arg vs `go.mod`.** Both say `1.26`. If `go.mod` bumps, bump the arg in `.infra/prod/fly.toml` at the same time.
+4. **CI token rotation.** `FLY_API_TOKEN` in GitHub secrets is scoped to the current Fly app. If the app is ever destroyed/recreated, re-issue with `flyctl tokens create deploy -c .infra/prod/fly.toml` and update the secret.
 
 ## Reference patterns from the sibling `rag` workspace
 

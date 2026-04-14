@@ -28,11 +28,14 @@ primary_region = 'fra'
   auto_start_machines = false
   min_machines_running = 1
 
+  # On shared-cpu-1x the VM is occasionally preempted, so a 5s timeout + 30s
+  # interval produces false-positive "health check failed" log lines even
+  # though the bot is healthy. Relaxed values eliminate the noise.
   [[http_service.checks]]
-    grace_period = '15s'
-    interval = '30s'
+    grace_period = '30s'
+    interval = '60s'
     method = 'GET'
-    timeout = '5s'
+    timeout = '10s'
     path = '/health'
 
 [[vm]]

@@ -105,7 +105,11 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 	}
 	switch opts.Quality {
 	case domain.QualityBest:
-		args = append(args, "--audio-format", "opus", "--audio-quality", "0")
+		// m4a (AAC), not opus: Telegram classifies .opus as a voice message
+		// and rejects with VOICE_MESSAGES_FORBIDDEN when the recipient has
+		// voice messages disabled. AAC is served natively by YouTube so this
+		// is usually extract-only, no transcode.
+		args = append(args, "--audio-format", "m4a", "--audio-quality", "0")
 	case domain.QualityGood:
 		args = append(args, "--audio-format", "mp3", "--audio-quality", "128K")
 	default:
@@ -135,10 +139,24 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var convertingEmitted bool
 	for scanner.Scan() {
 		line := scanner.Text()
-		if prog, ok := ParseProgressLine(line); ok && opts.OnProgress != nil {
-			opts.OnProgress(prog)
+		if prog, ok := ParseProgressLine(line); ok {
+			if opts.OnProgress != nil {
+				opts.OnProgress(prog)
+			}
+			continue
+		}
+		// After the download finishes, yt-dlp emits lines like
+		// "[ExtractAudio] Destination: ..." / "[ffmpeg] ..." while it
+		// transmuxes or transcodes. Surface that to the user once so the
+		// "Downloading... 100%" message does not look stuck for long videos.
+		if !convertingEmitted && isPostProcessingLine(line) {
+			convertingEmitted = true
+			if opts.OnProgress != nil {
+				opts.OnProgress(domain.Progress{Converting: true})
+			}
 		}
 	}
 	if err := cmd.Wait(); err != nil {
@@ -157,6 +175,14 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 }
 
 // --- helpers ---------------------------------------------------------------
+
+// isPostProcessingLine reports whether a yt-dlp stdout line signals that the
+// download is done and ffmpeg-based post-processing has started.
+func isPostProcessingLine(line string) bool {
+	return strings.Contains(line, "[ExtractAudio]") ||
+		strings.Contains(line, "[ffmpeg]") ||
+		strings.Contains(line, "[Fixup")
+}
 
 func (p *Provider) withCookies(args []string) []string {
 	if p.cfg.CookiesPath != "" {
@@ -216,7 +242,7 @@ func preferAudioFile(matches []string, q domain.Quality) string {
 	var want string
 	switch q {
 	case domain.QualityBest:
-		want = ".opus"
+		want = ".m4a"
 	case domain.QualityGood:
 		want = ".mp3"
 	}

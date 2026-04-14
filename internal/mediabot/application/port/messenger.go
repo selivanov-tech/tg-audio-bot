@@ -12,6 +12,14 @@ type KeyboardOption struct {
 	CallbackData string
 }
 
+// Command is one entry in the platform's "/" command menu.
+// Command is the name without the leading slash (e.g. "start");
+// Description is the short human-readable hint shown next to it.
+type Command struct {
+	Command     string
+	Description string
+}
+
 // Messenger is the bot's view of the chat platform. Phase 1 is Telegram only,
 // but nothing in this interface is Telegram-specific on purpose.
 //
@@ -29,4 +37,6 @@ type Messenger interface {
 	// AnswerCallback acknowledges an inline-button tap so the platform
 	// stops retrying the callback. Generic enough to belong in the port.
 	AnswerCallback(ctx context.Context, callbackQueryID string) error
+	// SetCommands registers the "/" command menu shown in chat clients.
+	SetCommands(ctx context.Context, cmds []Command) error
 }

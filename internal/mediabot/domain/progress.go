@@ -7,20 +7,24 @@ import "fmt"
 // All string fields hold pre-formatted yt-dlp output (e.g. "5.23MiB", "1.2MiB/s")
 // so the domain does not need unit-conversion logic.
 type Progress struct {
-	Percent   float64 // 0..100
-	TotalSize string  // e.g. "5.23MiB" or "~5.23MiB"
-	Speed     string  // e.g. "1.2MiB/s"
-	ETA       string  // e.g. "00:03"
+	Percent    float64 // 0..100
+	TotalSize  string  // e.g. "5.23MiB" or "~5.23MiB"
+	Speed      string  // e.g. "1.2MiB/s"
+	ETA        string  // e.g. "00:03"
+	Converting bool    // true once yt-dlp has entered post-processing (audio extract / transmux)
 }
 
-// DisplayString renders the progress for a Telegram message body.
+// DisplayString renders the progress for a Telegram message body (Russian).
 func (p Progress) DisplayString() string {
+	if p.Converting {
+		return "Конвертирую аудио... (для длинных видео нужна минута)"
+	}
 	if p.Percent >= 100 {
-		return "Downloading... 100%"
+		return "Скачиваю... 100%"
 	}
 	if p.TotalSize == "" {
-		return fmt.Sprintf("Downloading... %.1f%%", p.Percent)
+		return fmt.Sprintf("Скачиваю... %.1f%%", p.Percent)
 	}
-	return fmt.Sprintf("Downloading... %.1f%% of %s (%s, ETA %s)",
+	return fmt.Sprintf("Скачиваю... %.1f%% из %s (%s, ETA %s)",
 		p.Percent, p.TotalSize, p.Speed, p.ETA)
 }
