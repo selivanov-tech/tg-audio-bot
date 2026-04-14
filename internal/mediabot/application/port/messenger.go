@@ -26,4 +26,7 @@ type Messenger interface {
 	// error. Keeping it in the port avoids breaking the interface later.
 	SendVideo(ctx context.Context, chatID int64, filePath, title string) error
 	DeleteMessage(ctx context.Context, chatID int64, messageID int) error
+	// AnswerCallback acknowledges an inline-button tap so the platform
+	// stops retrying the callback. Generic enough to belong in the port.
+	AnswerCallback(ctx context.Context, callbackQueryID string) error
 }
