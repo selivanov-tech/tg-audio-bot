@@ -1,0 +1,36 @@
+# Excludes from the production build context.
+
+# 1. Secrets & local state
+**/.env
+**/.env.*
+**/plan.md
+
+# 2. Build artifacts & local runs
+/media-bot
+/mediabot-temp/
+**/*.log
+
+# 3. VCS & tooling
+**/.git
+**/.gitignore
+**/.gitattributes
+.github
+.idea
+.idea/shelf
+.idea/workspace.xml
+.idea/httpRequests
+.idea/queries
+.idea/dataSources
+.idea/dataSources.local.xml
+.vscode
+.claude
+
+# 4. Other infra folders not needed in prod image
+.infra/dev
+
+# 5. Fly config itself — read by flyctl outside the build context
+.infra/prod/fly.toml
+
+# 6. OS cruft
+**/.DS_Store
+**/Thumbs.db

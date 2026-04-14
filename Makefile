@@ -1,4 +1,4 @@
-.PHONY: run build test vet
+.PHONY: run build test vet deploy logs ssh
 
 run:
 	set -a; [ -f .env ] && . ./.env; set +a; go run ./cmd/media-bot
@@ -11,3 +11,12 @@ test:
 
 vet:
 	go vet ./...
+
+deploy:
+	flyctl deploy --remote-only -c .infra/prod/fly.toml
+
+logs:
+	flyctl logs -a <fly-app>
+
+ssh:
+	flyctl ssh console -a <fly-app>
