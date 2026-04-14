@@ -6,6 +6,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -24,22 +25,29 @@ type UpdateHandler interface {
 }
 
 // Bot is the Telegram adapter. It owns the underlying *tgbot.Bot client and
-// runs the polling loop when Start is called.
+// runs the webhook update-dispatcher when Start is called.
 type Bot struct {
 	b       *tgbot.Bot
 	handler UpdateHandler
 }
 
 // NewBot constructs the adapter and registers default handlers that forward
-// updates to h. Token is the bot API token from BotFather.
-func NewBot(token string, h UpdateHandler) (*Bot, error) {
+// updates to h. Token is the bot API token from BotFather. webhookSecret is
+// the random string Telegram echoes back in the X-Telegram-Bot-Api-Secret-Token
+// header; the library validates it on every incoming POST and silently drops
+// mismatches. Must be non-empty — we don't support an unauthenticated webhook.
+func NewBot(token, webhookSecret string, h UpdateHandler) (*Bot, error) {
 	if token == "" {
 		return nil, fmt.Errorf("telegram: empty token")
+	}
+	if webhookSecret == "" {
+		return nil, fmt.Errorf("telegram: empty webhook secret")
 	}
 	wrap := &Bot{handler: h}
 
 	opts := []tgbot.Option{
 		tgbot.WithDefaultHandler(wrap.dispatch),
+		tgbot.WithWebhookSecretToken(webhookSecret),
 	}
 	b, err := tgbot.New(token, opts...)
 	if err != nil {
@@ -49,9 +57,35 @@ func NewBot(token string, h UpdateHandler) (*Bot, error) {
 	return wrap, nil
 }
 
-// Start runs the long-polling loop until ctx is cancelled.
+// Start runs the webhook update-dispatcher loop until ctx is cancelled. It
+// reads from the internal updates channel populated by WebhookHandler and
+// invokes dispatch() for each update.
 func (t *Bot) Start(ctx context.Context) {
-	t.b.Start(ctx)
+	t.b.StartWebhook(ctx)
+}
+
+// WebhookHandler returns the HTTP handler that receives Telegram webhook
+// POSTs. Mount it on an HTTP mux at the path registered with RegisterWebhook.
+// The handler validates the secret token and enqueues updates for Start to
+// dispatch.
+func (t *Bot) WebhookHandler() http.HandlerFunc {
+	return t.b.WebhookHandler()
+}
+
+// RegisterWebhook tells Telegram where to POST updates. Idempotent: calling
+// with the same URL replaces the existing registration with no effect on
+// pending updates. Restricts update types to messages and callback queries
+// so the bot is not woken by irrelevant events (edits, polls, etc.).
+func (t *Bot) RegisterWebhook(ctx context.Context, url, secret string) error {
+	_, err := t.b.SetWebhook(ctx, &tgbot.SetWebhookParams{
+		URL:            url,
+		SecretToken:    secret,
+		AllowedUpdates: []string{"message", "callback_query"},
+	})
+	if err != nil {
+		return fmt.Errorf("telegram: set webhook: %w", err)
+	}
+	return nil
 }
 
 // dispatch is the single entry point for all updates. Message and

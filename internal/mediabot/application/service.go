@@ -93,6 +93,13 @@ func NewService(
 	return s
 }
 
+// Queue exposes the internal queue so wiring code (main.go) can attach
+// peripherals like the keep-alive goroutine that needs to know whether any
+// work is in flight. The queue itself is safe for concurrent use.
+func (s *Service) Queue() *Queue {
+	return s.queue
+}
+
 // HandleURL is called from the message router when a user sends a URL.
 // customName is optional; empty string means "use the title from the provider".
 func (s *Service) HandleURL(ctx context.Context, chatID int64, rawURL, customName string) {
