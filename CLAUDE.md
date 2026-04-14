@@ -56,6 +56,8 @@ These are easy to get wrong without reading multiple files together:
 
 8. **Logging is structured via `log/slog`.** A text handler is configured in `main.go` and injected into `Service` and `Handler` (both accept `*slog.Logger`; nil falls back to `slog.Default()`). Lifecycle pairs — `fetch info start`/`ok`/`failed`, `download start`/`ok`, `send start`/`ok` — let you trace one request end-to-end. When you add a new stage, emit both the start and the success log so failures are obvious by the missing `ok`.
 
+9. **Duration limit is application-layer policy, not a domain invariant.** `MEDIABOT_MAX_DURATION_MINUTES` is enforced in `Service.HandleURL` right after `fetch info ok`, before a `Download` aggregate is created. It's a policy knob (ops decision, env-driven) — not a rule of the `Download` state machine — so it deliberately does not live in the domain. A reported duration of `0` (livestream / missing metadata) is allowed through; only a positive duration exceeding the limit is rejected.
+
 ## Configuration
 
 All config via env (see Task 5):
@@ -65,6 +67,7 @@ All config via env (see Task 5):
 - `YTDLP_COOKIES_PATH` — optional; when set, passed as `--cookies` to both FetchInfo and Download (needed for some age-/region-restricted YouTube videos)
 - `MEDIABOT_TEMP_DIR` — default `os.TempDir()+"/mediabot"`
 - `MEDIABOT_MAX_CONCURRENT_DOWNLOADS` — default 3
+- `MEDIABOT_MAX_DURATION_MINUTES` — default 45. Videos longer than this are rejected right after `FetchInfo` with `MsgVideoTooLong`, before the quality keyboard is shown. Rationale: 45 min @ mp3 128k ≈ 42 MB still fits Telegram's 50 MB cap; longer audio almost always fails the send stage anyway, and for opus-source videos yt-dlp must transcode to m4a/mp3, which is multi-minute on a 512 MB shared-cpu VM and looks frozen to the user. `0` / unset / invalid all fall back to the 45 default (no "unlimited" mode on purpose).
 - `MEDIABOT_ALLOWED_CHAT_IDS` — **required**, comma-separated chat IDs. Empty/unset = boot fails with `ErrEmptyAllowlist` (deny-all by design). Group chat IDs are negative. See "Allowlist runbook" below.
 
 ## Third-party libs

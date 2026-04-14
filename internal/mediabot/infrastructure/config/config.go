@@ -18,7 +18,13 @@ type Config struct {
 	YtDlpCookiesPath      string // empty = no cookies
 	TempDir               string
 	MaxConcurrentDownload int
-	AllowedChatIDs        map[int64]struct{}
+	// MaxDurationMinutes rejects videos longer than this at FetchInfo time.
+	// Default 45 min keeps the extracted audio close to Telegram's 50 MB cap
+	// and avoids multi-hour ffmpeg transcodes that look frozen to the user
+	// and almost always fail to send anyway. 0 or unset = default (not
+	// unlimited — that would be a footgun).
+	MaxDurationMinutes int
+	AllowedChatIDs     map[int64]struct{}
 }
 
 // ErrMissingToken is returned when TELEGRAM_BOT_TOKEN is unset.
@@ -48,6 +54,7 @@ func Load() (Config, error) {
 		YtDlpCookiesPath:      os.Getenv("YTDLP_COOKIES_PATH"),
 		TempDir:               envOrDefault("MEDIABOT_TEMP_DIR", filepath.Join(os.TempDir(), "mediabot")),
 		MaxConcurrentDownload: envIntOrDefault("MEDIABOT_MAX_CONCURRENT_DOWNLOADS", 3),
+		MaxDurationMinutes:    envIntOrDefault("MEDIABOT_MAX_DURATION_MINUTES", 45),
 		AllowedChatIDs:        allowed,
 	}, nil
 }

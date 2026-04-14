@@ -63,6 +63,14 @@ func MsgQueued(position int) string {
 	return fmt.Sprintf("В очереди (позиция %d). Начну после текущей загрузки.", position)
 }
 
+// MsgVideoTooLong renders the duration-limit rejection shown before any
+// download starts. Both durations are minutes, rounded up from the provider's
+// reported duration so a 45:30 video reads as "46" not "45".
+func MsgVideoTooLong(actualMin, limitMin int) string {
+	return fmt.Sprintf("Видео длится %d мин — лимит %d мин. Отправьте более короткое видео.",
+		actualMin, limitMin)
+}
+
 // MsgTooLarge renders the 50MB-limit rejection. suggestGood is true when the
 // user picked Best quality and Good might fit under the cap.
 func MsgTooLarge(sizeMB int64, suggestGood bool) string {
