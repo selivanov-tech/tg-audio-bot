@@ -4,10 +4,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/rag-brothers/media-bot/internal/mediabot/application"
 	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
@@ -28,6 +31,11 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// --- health server ------------------------------------------------------
+	// Fly.io hits GET /health every 30s. Without a 200 reply the machine is
+	// marked unhealthy and restarted.
+	healthSrv := startHealthServer(ctx)
 
 	// --- adapters -----------------------------------------------------------
 	registry := domain.NewProviderRegistry()
@@ -53,7 +61,41 @@ func main() {
 
 	log.Printf("media-bot starting: max_concurrent=%d temp_dir=%s", cfg.MaxConcurrentDownload, cfg.TempDir)
 	bot.Start(ctx)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = healthSrv.Shutdown(shutdownCtx)
 	log.Printf("media-bot shutdown")
+}
+
+// startHealthServer launches a minimal HTTP server on $PORT (default 8080)
+// that answers GET /health with 200 OK. It shuts down gracefully when ctx
+// is cancelled.
+func startHealthServer(ctx context.Context) *http.Server {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		log.Printf("health server listening on :%s", port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("health server: %v", err)
+		}
+	}()
+
+	return srv
 }
 
 // lazyHandler defers resolution of the real *Handler until the first update
