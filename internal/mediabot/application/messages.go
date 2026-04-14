@@ -24,10 +24,38 @@ const (
 	MsgStaleSelection   = "Эта кнопка больше не активна. Отправьте ссылку ещё раз."
 	MsgSending          = "Отправляю аудио..."
 	MsgSendFailed       = "Не удалось отправить аудио. Попробуйте ещё раз."
-	MsgInternalError    = "Внутренняя ошибка. Попробуйте ещё раз."
-	MsgQualityBestLabel = "Лучшее (M4A)"
-	MsgQualityGoodLabel = "Хорошее (MP3)"
+	MsgInternalError = "Внутренняя ошибка. Попробуйте ещё раз."
 )
+
+// QualityLabel returns the user-facing button text for a quality tier.
+// Kept in the application layer so domain has no UI concerns.
+func QualityLabel(q domain.Quality) string {
+	switch q {
+	case domain.QualityBest:
+		return "Лучшее (M4A)"
+	case domain.QualityGood:
+		return "Хорошее (MP3)"
+	default:
+		return "Неизвестно"
+	}
+}
+
+// RenderProgress turns a domain.Progress snapshot into a Telegram message body.
+// Single renderer for all progress ticks (including the initial "0%" before
+// yt-dlp emits any real progress line).
+func RenderProgress(p domain.Progress) string {
+	if p.Converting {
+		return "Конвертирую аудио... (для длинных видео нужна минута)"
+	}
+	if p.Percent >= 100 {
+		return "Скачиваю... 100%"
+	}
+	if p.TotalSize == "" {
+		return fmt.Sprintf("Скачиваю... %.1f%%", p.Percent)
+	}
+	return fmt.Sprintf("Скачиваю... %.1f%% из %s (%s, ETA %s)",
+		p.Percent, p.TotalSize, p.Speed, p.ETA)
+}
 
 // MsgQueued renders the "waiting in queue" status.
 func MsgQueued(position int) string {
@@ -43,20 +71,6 @@ func MsgTooLarge(sizeMB int64, suggestGood bool) string {
 	}
 	return msg
 }
-
-// MsgProgressDownloading renders a mid-download progress tick.
-func MsgProgressDownloading(pct float64, totalSize, speed, eta string) string {
-	if totalSize == "" {
-		return fmt.Sprintf("Скачиваю... %.1f%%", pct)
-	}
-	return fmt.Sprintf("Скачиваю... %.1f%% из %s (%s, ETA %s)", pct, totalSize, speed, eta)
-}
-
-// MsgProgressDone is shown at 100% download before post-processing begins.
-const MsgProgressDone = "Скачиваю... 100%"
-
-// MsgProgressConverting is shown once yt-dlp enters audio extraction / transmux.
-const MsgProgressConverting = "Конвертирую аудио... (для длинных видео нужна минута)"
 
 // Stage identifies which lifecycle phase produced an error, so MapUserError
 // can return stage-appropriate Russian text for the same underlying cause.

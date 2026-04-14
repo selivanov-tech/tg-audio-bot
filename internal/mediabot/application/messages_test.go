@@ -104,19 +104,6 @@ func TestMsgTooLarge(t *testing.T) {
 	}
 }
 
-func TestMsgProgressDownloading(t *testing.T) {
-	bare := MsgProgressDownloading(45.5, "", "", "")
-	if !strings.Contains(bare, "45.5%") || strings.Contains(bare, "из") {
-		t.Errorf("bare form wrong: %q", bare)
-	}
-	full := MsgProgressDownloading(45.5, "5.23MiB", "1.2MiB/s", "00:03")
-	for _, s := range []string{"45.5%", "5.23MiB", "1.2MiB/s", "00:03", "из"} {
-		if !strings.Contains(full, s) {
-			t.Errorf("full form missing %q in %q", s, full)
-		}
-	}
-}
-
 // Sanity: the function doesn't panic on odd inputs.
 func TestMapUserError_DoesNotPanic(t *testing.T) {
 	defer func() {

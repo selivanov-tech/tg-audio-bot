@@ -52,6 +52,10 @@ These are easy to get wrong without reading multiple files together:
 
 6. **Domain errors are exhaustive.** `ErrUnsupportedURL` covers both "we don't support this domain" and "no provider matched" — do not introduce a separate `ErrNoProviderFound`.
 
+7. **All user-facing text lives in `application/messages.go`.** This is the single edit point for Russian strings — fixed constants (`MsgHelp`, `MsgFetching`, ...), formatters (`MsgQueued`, `MsgTooLarge`), renderers (`QualityLabel`, `RenderProgress`), and the error mapper (`MapUserError(stage, err)`). Domain types carry data only — `Quality.String()` returns the machine identifier for callback data, not a label; `Progress` is a pure struct with no render method. Never hardcode a user-facing string at a call site and never surface raw `err.Error()` to the user — route it through `MapUserError`.
+
+8. **Logging is structured via `log/slog`.** A text handler is configured in `main.go` and injected into `Service` and `Handler` (both accept `*slog.Logger`; nil falls back to `slog.Default()`). Lifecycle pairs — `fetch info start`/`ok`/`failed`, `download start`/`ok`, `send start`/`ok` — let you trace one request end-to-end. When you add a new stage, emit both the start and the success log so failures are obvious by the missing `ok`.
+
 ## Configuration
 
 All config via env (see Task 5):
