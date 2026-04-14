@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -15,6 +16,18 @@ import (
 // maxTelegramAudioBytes is the hard limit for sendAudio via the default Bot
 // API (50 MiB). See CLAUDE.md: a local Bot API server would lift this.
 const maxTelegramAudioBytes int64 = 50 * 1024 * 1024
+
+// fetchInfoTimeout caps the provider's metadata call. yt-dlp makes HTTP
+// requests to YouTube that can hang without this — users see the
+// "Fetching video info..." message forever with nothing in the logs.
+const fetchInfoTimeout = 45 * time.Second
+
+// maxConcurrentFetchInfo caps how many yt-dlp metadata probes can run at
+// once across all users. Each yt-dlp invocation spawns Python + network I/O
+// (~70 MB RSS); on a 512 MB VM, 4+ in parallel OOM-kill the process. A user
+// flooding URLs would otherwise spawn one yt-dlp per message with no gate,
+// because the per-user download queue only serializes downloads, not fetches.
+const maxConcurrentFetchInfo = 2
 
 // progressEditInterval throttles user-facing progress updates to avoid hitting
 // Telegram's per-chat edit rate limit. The final 100% tick always bypasses
@@ -29,6 +42,7 @@ type Service struct {
 	messenger port.Messenger
 	queue     *Queue
 	tempDir   string
+	log       *slog.Logger
 
 	pendingMu sync.Mutex
 	// pending is keyed by the keyboard message ID — when the user taps a
@@ -41,6 +55,10 @@ type Service struct {
 	// edit and the throttle timestamp. UI state is kept here (not on the
 	// aggregate) so the domain stays free of transport concerns.
 	progress map[*domain.Download]*progressState
+
+	// fetchInfoSem gates concurrent yt-dlp metadata calls workspace-wide to
+	// keep memory use within the VM's limit. See maxConcurrentFetchInfo.
+	fetchInfoSem chan struct{}
 }
 
 // NewService wires the service. The queue is built here because the service
@@ -50,13 +68,19 @@ func NewService(
 	messenger port.Messenger,
 	tempDir string,
 	maxConcurrent int,
+	logger *slog.Logger,
 ) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	s := &Service{
-		registry:  registry,
-		messenger: messenger,
-		tempDir:   tempDir,
-		pending:   make(map[int]*domain.Download),
-		progress:  make(map[*domain.Download]*progressState),
+		registry:     registry,
+		messenger:    messenger,
+		tempDir:      tempDir,
+		log:          logger,
+		pending:      make(map[int]*domain.Download),
+		progress:     make(map[*domain.Download]*progressState),
+		fetchInfoSem: make(chan struct{}, maxConcurrentFetchInfo),
 	}
 	s.queue = NewQueue(s, maxConcurrent)
 	return s
@@ -68,18 +92,34 @@ func (s *Service) HandleURL(ctx context.Context, chatID int64, rawURL, customNam
 	provider, err := s.registry.Detect(rawURL)
 	if err != nil {
 		if errors.Is(err, domain.ErrUnsupportedURL) {
-			_, _ = s.messenger.SendText(ctx, chatID, "Unsupported URL. Currently supported: YouTube")
+			s.log.Warn("url rejected", "chat", chatID, "url", rawURL, "reason", "unsupported")
+			_, _ = s.messenger.SendText(ctx, chatID, MsgUnsupportedURL)
 			return
 		}
-		_, _ = s.messenger.SendText(ctx, chatID, "Could not route URL. Try again.")
+		s.log.Error("url route failed", "chat", chatID, "url", rawURL, "err", err)
+		_, _ = s.messenger.SendText(ctx, chatID, MsgRouteFailed)
+		return
+	}
+	s.log.Info("url routed", "chat", chatID, "url", rawURL, "provider", provider.ID())
+
+	progressMsgID, _ := s.messenger.SendText(ctx, chatID, MsgFetching)
+
+	// Gate on the global fetch semaphore before logging "start" so timestamps
+	// reflect when yt-dlp actually runs, not when the user sent the URL.
+	select {
+	case s.fetchInfoSem <- struct{}{}:
+	case <-ctx.Done():
 		return
 	}
 
-	progressMsgID, _ := s.messenger.SendText(ctx, chatID, "Fetching video info...")
-
-	info, err := provider.FetchInfo(ctx, rawURL)
+	s.log.Info("fetch info start", "chat", chatID, "url", rawURL)
+	fetchCtx, cancel := context.WithTimeout(ctx, fetchInfoTimeout)
+	info, err := provider.FetchInfo(fetchCtx, rawURL)
+	cancel()
+	<-s.fetchInfoSem
 	if err != nil {
-		s.replaceOrSend(ctx, chatID, progressMsgID, "Could not fetch video info. URL may be private or restricted.")
+		s.log.Error("fetch info failed", "chat", chatID, "url", rawURL, "err", err)
+		s.replaceOrSend(ctx, chatID, progressMsgID, MapUserError(StageFetch, err))
 		return
 	}
 
@@ -98,7 +138,7 @@ func (s *Service) HandleURL(ctx context.Context, chatID int64, rawURL, customNam
 	if progressMsgID != 0 {
 		_ = s.messenger.DeleteMessage(ctx, chatID, progressMsgID)
 	}
-	kbMsgID, err := s.messenger.SendOptionsKeyboard(ctx, chatID, header+"\n\nChoose quality:", []port.KeyboardOption{
+	kbMsgID, err := s.messenger.SendOptionsKeyboard(ctx, chatID, header+"\n\n"+MsgChooseQuality, []port.KeyboardOption{
 		{Label: domain.QualityBest.Label(), CallbackData: "quality:" + domain.QualityBest.String()},
 		{Label: domain.QualityGood.Label(), CallbackData: "quality:" + domain.QualityGood.String()},
 	})
@@ -123,11 +163,13 @@ func (s *Service) HandleQualitySelection(ctx context.Context, chatID int64, q do
 	}
 	s.pendingMu.Unlock()
 	if !ok {
-		return // stale callback, ignore
+		s.log.Warn("callback stale", "chat", chatID, "msg_id", keyboardMsgID)
+		return
 	}
+	s.log.Info("quality selected", "chat", chatID, "quality", q.String())
 
 	if err := d.SelectQuality(q); err != nil {
-		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, "That selection is no longer valid. Send the URL again.")
+		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, MsgStaleSelection)
 		return
 	}
 	// Reuse the keyboard message for progress updates — we stash its ID on
@@ -137,11 +179,11 @@ func (s *Service) HandleQualitySelection(ctx context.Context, chatID int64, q do
 	s.progressMu.Unlock()
 
 	position := s.queue.Enqueue(ctx, d)
+	s.log.Info("queued", "chat", chatID, "url", d.URL(), "position", position)
 	if position > 1 {
-		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID,
-			fmt.Sprintf("Queued (position %d). Will start after your current download.", position))
+		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, MsgQueued(position))
 	} else {
-		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, "Downloading... 0%")
+		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, MsgProgressDownloading(0, "", "", ""))
 	}
 }
 
@@ -166,12 +208,12 @@ func (s *Service) Process(ctx context.Context, d *domain.Download) {
 	st := s.progressStateFor(d)
 
 	if err := d.MarkDownloading(); err != nil {
-		s.failDownload(ctx, d, fmt.Errorf("internal: %w", err), "Internal error.")
+		s.failDownload(ctx, d, fmt.Errorf("internal: %w", err), MsgInternalError)
 		return
 	}
 	// If we were queued, the message still says "Queued...". Reset it.
 	if st != nil {
-		_ = s.messenger.EditText(ctx, chatID, st.msgID, "Downloading... 0%")
+		_ = s.messenger.EditText(ctx, chatID, st.msgID, MsgProgressDownloading(0, "", "", ""))
 		st.mu.Lock()
 		st.lastEdit = time.Now()
 		st.mu.Unlock()
@@ -179,18 +221,18 @@ func (s *Service) Process(ctx context.Context, d *domain.Download) {
 
 	provider, err := s.registry.Detect(d.URL())
 	if err != nil {
-		s.failDownload(ctx, d, err, "Unsupported URL.")
+		s.failDownload(ctx, d, err, MsgUnsupportedURL)
 		return
 	}
 
 	// Per-download temp subdir; easy cleanup.
 	if err := os.MkdirAll(s.tempDir, 0o755); err != nil {
-		s.failDownload(ctx, d, err, "Could not create temp dir.")
+		s.failDownload(ctx, d, err, MsgInternalError)
 		return
 	}
 	subDir, err := os.MkdirTemp(s.tempDir, "dl-*")
 	if err != nil {
-		s.failDownload(ctx, d, err, "Could not create temp dir.")
+		s.failDownload(ctx, d, err, MsgInternalError)
 		return
 	}
 	defer func() { _ = os.RemoveAll(subDir) }()
@@ -203,40 +245,41 @@ func (s *Service) Process(ctx context.Context, d *domain.Download) {
 		Filename:   d.EffectiveFilename(),
 		OnProgress: s.progressCallback(ctx, chatID, st),
 	}
+	s.log.Info("download start", "chat", chatID, "url", d.URL(), "quality", d.Quality().String())
 	filePath, err := provider.Download(ctx, opts)
 	if err != nil {
-		s.failDownload(ctx, d, err, "Download failed: "+err.Error())
+		s.failDownload(ctx, d, err, MapUserError(StageDownload, err))
 		return
 	}
 
 	if err := d.MarkSending(); err != nil {
-		s.failDownload(ctx, d, err, "Internal error.")
+		s.failDownload(ctx, d, err, MsgInternalError)
 		return
 	}
 
 	// 50MB cap (default Bot API). Suggest Good quality when Best overflowed.
 	stat, err := os.Stat(filePath)
 	if err != nil {
-		s.failDownload(ctx, d, err, "Download artifact missing.")
+		s.failDownload(ctx, d, err, MsgInternalError)
 		return
 	}
+	sizeMB := stat.Size() / (1024 * 1024)
 	if stat.Size() > maxTelegramAudioBytes {
-		sizeMiB := stat.Size() / (1024 * 1024)
-		msg := fmt.Sprintf("Audio is %d MB, over Telegram's 50MB limit.", sizeMiB)
-		if d.Quality() == domain.QualityBest {
-			msg += " Try Good quality."
-		}
+		msg := MsgTooLarge(sizeMB, d.Quality() == domain.QualityBest)
 		s.failDownload(ctx, d, domain.ErrFileTooLarge, msg)
 		return
 	}
+	s.log.Info("download ok", "chat", chatID, "url", d.URL(), "size_mb", sizeMB)
 
 	if st != nil {
-		_ = s.messenger.EditText(ctx, chatID, st.msgID, "Sending audio...")
+		_ = s.messenger.EditText(ctx, chatID, st.msgID, MsgSending)
 	}
+	s.log.Info("send start", "chat", chatID, "size_mb", sizeMB)
 	if err := s.messenger.SendAudio(ctx, chatID, filePath, d.EffectiveFilename()); err != nil {
-		s.failDownload(ctx, d, err, "Failed to send audio. Try again.")
+		s.failDownload(ctx, d, err, MapUserError(StageSend, err))
 		return
 	}
+	s.log.Info("send ok", "chat", chatID)
 
 	_ = d.MarkComplete()
 	if st != nil {
@@ -254,7 +297,7 @@ func (s *Service) progressCallback(ctx context.Context, chatID int64, st *progre
 	return func(p domain.Progress) {
 		st.mu.Lock()
 		now := time.Now()
-		should := p.Percent >= 100 || now.Sub(st.lastEdit) >= progressEditInterval
+		should := p.Converting || p.Percent >= 100 || now.Sub(st.lastEdit) >= progressEditInterval
 		if should {
 			st.lastEdit = now
 		}
@@ -272,6 +315,11 @@ func (s *Service) progressCallback(ctx context.Context, chatID int64, st *progre
 func (s *Service) failDownload(ctx context.Context, d *domain.Download, cause error, userMsg string) {
 	_ = d.MarkFailed(cause)
 	chatID := d.ChatID()
+	s.log.Error("download failed",
+		"chat", chatID,
+		"url", d.URL(),
+		"state", d.State(),
+		"err", cause)
 	st := s.progressStateFor(d)
 	if st != nil {
 		_ = s.messenger.EditText(ctx, chatID, st.msgID, userMsg)

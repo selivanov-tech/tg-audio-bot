@@ -150,3 +150,19 @@ func (t *Bot) AnswerCallback(ctx context.Context, callbackQueryID string) error 
 	})
 	return err
 }
+
+// SetCommands registers the bot's "/" command menu with Telegram. Usually
+// called once at startup; persists server-side so users see it in-chat.
+func (t *Bot) SetCommands(ctx context.Context, cmds []port.Command) error {
+	botCmds := make([]models.BotCommand, 0, len(cmds))
+	for _, c := range cmds {
+		botCmds = append(botCmds, models.BotCommand{
+			Command:     c.Command,
+			Description: c.Description,
+		})
+	}
+	_, err := t.b.SetMyCommands(ctx, &tgbot.SetMyCommandsParams{
+		Commands: botCmds,
+	})
+	return err
+}

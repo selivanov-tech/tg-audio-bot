@@ -1,7 +1,7 @@
 package domain
 
 // Quality is the user-selectable audio quality tier.
-// Best = opus (smaller file, better quality); Good = mp3 128k (widest compatibility).
+// Best = m4a/AAC (high quality); Good = mp3 128k (widest compatibility).
 type Quality int
 
 const (
@@ -21,14 +21,14 @@ func (q Quality) String() string {
 	}
 }
 
-// Label returns the user-facing button text.
+// Label returns the user-facing button text (Russian).
 func (q Quality) Label() string {
 	switch q {
 	case QualityBest:
-		return "Best (Opus)"
+		return "Лучшее (M4A)"
 	case QualityGood:
-		return "Good (MP3)"
+		return "Хорошее (MP3)"
 	default:
-		return "Unknown"
+		return "Неизвестно"
 	}
 }

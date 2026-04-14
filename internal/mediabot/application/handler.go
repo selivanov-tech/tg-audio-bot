@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"log/slog"
 	"regexp"
 	"strings"
 
@@ -15,28 +16,30 @@ import (
 type Handler struct {
 	svc       *Service
 	messenger port.Messenger
+	log       *slog.Logger
 }
 
-func NewHandler(svc *Service, messenger port.Messenger) *Handler {
-	return &Handler{svc: svc, messenger: messenger}
+func NewHandler(svc *Service, messenger port.Messenger, logger *slog.Logger) *Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Handler{svc: svc, messenger: messenger, log: logger}
 }
 
 // urlRe finds the first URL in a free-form message. Intentionally permissive:
 // provider.MatchesURL does the real filtering.
 var urlRe = regexp.MustCompile(`https?://\S+`)
 
-const helpText = "Send me a YouTube URL and I'll download the audio.\n\n" +
-	"Optional: use /download <url> <name> to save it with a custom filename."
-
 func (h *Handler) HandleMessage(ctx context.Context, chatID int64, text string, _ int) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
+	h.log.Info("msg received", "chat", chatID, "text_len", len(text))
 
 	switch {
 	case text == "/start", text == "/help":
-		_, _ = h.messenger.SendText(ctx, chatID, helpText)
+		_, _ = h.messenger.SendText(ctx, chatID, MsgHelp)
 		return
 	case strings.HasPrefix(text, "/download"):
 		h.handleDownloadCommand(ctx, chatID, text)
@@ -54,7 +57,7 @@ func (h *Handler) HandleMessage(ctx context.Context, chatID int64, text string, 
 func (h *Handler) handleDownloadCommand(ctx context.Context, chatID int64, text string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(text, "/download"))
 	if rest == "" {
-		_, _ = h.messenger.SendText(ctx, chatID, "Usage: /download <url> [name]")
+		_, _ = h.messenger.SendText(ctx, chatID, MsgDownloadUsage)
 		return
 	}
 	fields := strings.Fields(rest)
@@ -70,10 +73,12 @@ func (h *Handler) HandleCallback(ctx context.Context, chatID int64, data string,
 	_ = h.messenger.AnswerCallback(ctx, callbackQueryID)
 
 	if !strings.HasPrefix(data, "quality:") {
+		h.log.Warn("callback unknown", "chat", chatID, "data", data)
 		return
 	}
 	q, ok := parseQuality(strings.TrimPrefix(data, "quality:"))
 	if !ok {
+		h.log.Warn("callback unknown", "chat", chatID, "data", data)
 		return
 	}
 	h.svc.HandleQualitySelection(ctx, chatID, q, messageID)
