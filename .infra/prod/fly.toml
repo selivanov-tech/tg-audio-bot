@@ -18,27 +18,31 @@ primary_region = 'fra'
   MEDIABOT_TEMP_DIR = '/tmp/mediabot'
   MEDIABOT_MAX_CONCURRENT_DOWNLOADS = '3'
   YTDLP_PATH = '/usr/local/bin/yt-dlp'
+  # Public base URL, used for webhook registration and keep-alive self-ping.
+  MEDIABOT_PUBLIC_URL = 'https://tg-audio-bot.fly.dev'
 
-# Long-polling bot with an in-memory per-user queue:
-# machine must stay up and must not auto-stop.
+# Webhook-driven bot with zero-scale: machine stops on HTTP idle and Fly's
+# proxy auto-starts it on the next Telegram webhook POST. The bot's keep-alive
+# goroutine pings /health every 2 min while downloads are active so long
+# downloads are not cut off mid-flight.
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false
-  auto_start_machines = false
-  min_machines_running = 1
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
 
   # On shared-cpu-1x the VM is occasionally preempted, so a 5s timeout + 30s
   # interval produces false-positive "health check failed" log lines even
   # though the bot is healthy. Relaxed values eliminate the noise.
   [[http_service.checks]]
-    grace_period = '30s'
+    grace_period = '15s'
     interval = '60s'
     method = 'GET'
     timeout = '10s'
     path = '/health'
 
 [[vm]]
-  memory = '1Gb'
+  memory = '512Mb'
   cpu_kind = 'shared'
   cpus = 1

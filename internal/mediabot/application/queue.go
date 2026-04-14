@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
 )
@@ -24,6 +25,12 @@ type Queue struct {
 
 	mu      sync.Mutex
 	buckets map[int64]*userBucket
+
+	// active counts items that have been enqueued but not yet fully processed
+	// (queued OR currently running). Used by the keep-alive goroutine to
+	// decide whether to ping /health and keep Fly's auto-stop idle timer
+	// from expiring mid-download. See application/keepalive.go.
+	active atomic.Int64
 }
 
 // Processor runs one download to completion. The Queue never calls it
@@ -72,6 +79,8 @@ func (q *Queue) Enqueue(ctx context.Context, d *domain.Download) int {
 	}
 	q.mu.Unlock()
 
+	q.active.Add(1)
+
 	if needSpawn {
 		go q.drain(ctx, chatID)
 	}
@@ -90,14 +99,24 @@ func (q *Queue) drain(ctx context.Context, chatID int64) {
 		}
 
 		// Global cap: block until a slot is free or ctx is cancelled.
+		// On shutdown we still decrement active so the counter stays
+		// consistent with the items we've popped.
 		select {
 		case q.sem <- struct{}{}:
 		case <-ctx.Done():
+			q.active.Add(-1)
 			return
 		}
 		q.processor.Process(ctx, d)
+		q.active.Add(-1)
 		<-q.sem
 	}
+}
+
+// Active returns the number of enqueued-or-running downloads across all
+// users. Zero means the machine has no reason to stay awake.
+func (q *Queue) Active() int64 {
+	return q.active.Load()
 }
 
 // popNext removes and returns the next item for chatID. If the bucket is

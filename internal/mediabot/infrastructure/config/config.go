@@ -25,6 +25,18 @@ type Config struct {
 	// unlimited — that would be a footgun).
 	MaxDurationMinutes int
 	AllowedChatIDs     map[int64]struct{}
+
+	// PublicURL is the externally reachable base URL of this bot (no trailing
+	// slash), e.g. "https://tg-audio-bot.fly.dev". Used for two things:
+	// (1) webhook registration with Telegram — "${PublicURL}/webhook"
+	// (2) keep-alive self-ping while downloads are active — "${PublicURL}/health"
+	// via the Fly proxy so the auto-stop idle timer resets.
+	PublicURL string
+
+	// WebhookSecret is a random token Telegram echoes back in the
+	// X-Telegram-Bot-Api-Secret-Token header on each webhook POST. The
+	// Telegram adapter validates it and silently drops forged requests.
+	WebhookSecret string
 }
 
 // ErrMissingToken is returned when TELEGRAM_BOT_TOKEN is unset.
@@ -34,6 +46,14 @@ var ErrMissingToken = errors.New("TELEGRAM_BOT_TOKEN is required")
 // or parses to zero IDs. Empty = deny-all by design: a misconfigured prod
 // deploy should fail loudly at boot, not silently let everyone in.
 var ErrEmptyAllowlist = errors.New("MEDIABOT_ALLOWED_CHAT_IDS is required and must contain at least one chat ID")
+
+// ErrMissingPublicURL is returned when MEDIABOT_PUBLIC_URL is unset. The
+// webhook transport has no polling fallback, so we fail loud at boot.
+var ErrMissingPublicURL = errors.New("MEDIABOT_PUBLIC_URL is required (e.g. https://tg-audio-bot.fly.dev)")
+
+// ErrMissingWebhookSecret is returned when TELEGRAM_WEBHOOK_SECRET is unset.
+// Without it the /webhook endpoint is publicly POST-able by anyone.
+var ErrMissingWebhookSecret = errors.New("TELEGRAM_WEBHOOK_SECRET is required; generate with `openssl rand -hex 32`")
 
 // Load reads config from the environment. It returns ErrMissingToken when
 // the Telegram token is absent; other fields fall back to sensible defaults.
@@ -48,6 +68,16 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	publicURL := strings.TrimRight(strings.TrimSpace(os.Getenv("MEDIABOT_PUBLIC_URL")), "/")
+	if publicURL == "" {
+		return Config{}, ErrMissingPublicURL
+	}
+
+	webhookSecret := strings.TrimSpace(os.Getenv("TELEGRAM_WEBHOOK_SECRET"))
+	if webhookSecret == "" {
+		return Config{}, ErrMissingWebhookSecret
+	}
+
 	return Config{
 		TelegramBotToken:      token,
 		YtDlpPath:             envOrDefault("YTDLP_PATH", "yt-dlp"),
@@ -56,6 +86,8 @@ func Load() (Config, error) {
 		MaxConcurrentDownload: envIntOrDefault("MEDIABOT_MAX_CONCURRENT_DOWNLOADS", 3),
 		MaxDurationMinutes:    envIntOrDefault("MEDIABOT_MAX_DURATION_MINUTES", 45),
 		AllowedChatIDs:        allowed,
+		PublicURL:             publicURL,
+		WebhookSecret:         webhookSecret,
 	}, nil
 }
 

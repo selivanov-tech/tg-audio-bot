@@ -58,11 +58,17 @@ These are easy to get wrong without reading multiple files together:
 
 9. **Duration limit is application-layer policy, not a domain invariant.** `MEDIABOT_MAX_DURATION_MINUTES` is enforced in `Service.HandleURL` right after `fetch info ok`, before a `Download` aggregate is created. It's a policy knob (ops decision, env-driven) — not a rule of the `Download` state machine — so it deliberately does not live in the domain. A reported duration of `0` (livestream / missing metadata) is allowed through; only a positive duration exceeding the limit is rejected.
 
+10. **Webhook transport + Fly zero-scale.** The bot uses webhook intake, not long-polling: Fly stops the VM on HTTP idle and auto-starts it on the next Telegram POST. The Telegram adapter (`internal/mediabot/infrastructure/telegram/bot.go`) exposes `WebhookHandler()` (mounted at `/webhook` by `main.go`) and `Start(ctx)` which drains the internal updates channel via `go-telegram/bot`'s `StartWebhook`. On every boot `RegisterWebhook` re-registers the URL with Telegram (idempotent; keeps ops self-healing). Never switch back to `bot.Start` (polling) — a stopped VM can't poll, so the bot would never wake.
+
+11. **Keep-alive self-ping.** `Queue.active` is an atomic counter bumped on `Enqueue` and decremented when `Process` returns. `application.KeepAlive` runs as a goroutine from `main.go`; every 2 min it reads `queue.Active()` and, if non-zero, GETs `${MEDIABOT_PUBLIC_URL}/health`. The ping must traverse the Fly proxy (public URL, not localhost) to reset the auto-stop idle timer. Without this, a multi-minute yt-dlp download with no concurrent webhooks would have the VM stopped from under it.
+
 ## Configuration
 
 All config via env (see Task 5):
 
 - `TELEGRAM_BOT_TOKEN` — required
+- `TELEGRAM_WEBHOOK_SECRET` — **required**. Random string Telegram echoes back in the `X-Telegram-Bot-Api-Secret-Token` header on every webhook POST; the Telegram adapter silently drops mismatches. Generate once with `openssl rand -hex 32`. Empty/unset = boot fails with `ErrMissingWebhookSecret`.
+- `MEDIABOT_PUBLIC_URL` — **required**. Externally reachable base URL, no trailing slash (prod: `https://tg-audio-bot.fly.dev`). Used for two things: (1) webhook registration with Telegram at `${PublicURL}/webhook` on every boot; (2) keep-alive self-ping at `${PublicURL}/health` while any download is active, so the request traverses Fly's proxy and resets the auto-stop idle timer. Localhost would bypass the proxy and not count. Empty/unset = boot fails with `ErrMissingPublicURL`.
 - `YTDLP_PATH` — default `yt-dlp`
 - `YTDLP_COOKIES_PATH` — optional; when set, passed as `--cookies` to both FetchInfo and Download (needed for some age-/region-restricted YouTube videos)
 - `MEDIABOT_TEMP_DIR` — default `os.TempDir()+"/mediabot"`
@@ -80,10 +86,10 @@ All config via env (see Task 5):
 Production runs on Fly.io. Layout mirrors `/Volumes/Dev/code/shared/lms/math`:
 
 - `.infra/prod/Dockerfile` — two-stage build. `golang:1.26-bookworm` → `debian:bookworm-slim` with `ffmpeg`, `python3`, and a pinned `yt-dlp` binary (ARG `YTDLP_VERSION`). Bump the version arg when yt-dlp breaks on YouTube changes.
-- `.infra/prod/fly.toml` — app `tg-audio-bot`, region `fra`, 512MB shared-cpu-1x. `auto_stop_machines = false` and `min_machines_running = 1` because the per-user queue is in-memory and cannot survive suspension. Health check hits `/health` every 30s.
+- `.infra/prod/fly.toml` — app `tg-audio-bot`, region `fra`, 512MB shared-cpu-1x. **Zero-scale**: `auto_stop_machines = 'stop'`, `auto_start_machines = true`, `min_machines_running = 0`. The Fly proxy buffers the first Telegram webhook POST after idle, cold-starts the VM (~5–10s), and forwards the request. Between active sessions the machine is stopped and billing pauses.
 - `.infra/prod/fly/entrypoint.sh` — **sources** every `/opt/fly/scripts/*.sh` hook (so hooks can export env vars that reach `media-bot`), then execs the binary. Drop shell scripts into `.infra/prod/fly/scripts/` to extend; see the cookies runbook below for an example.
 - `.github/workflows/deploy.yml` — manual `workflow_dispatch` only. Runs `go vet` + `golangci-lint` + `go test ./internal/mediabot/...` before `flyctl deploy`, then smoke-checks `/health`.
-- `cmd/media-bot/main.go` serves `GET /health` on `$PORT` (default 8080) alongside the polling loop so Fly's HTTP check can pass.
+- `cmd/media-bot/main.go` serves two routes on `$PORT` (default 8080): `GET /health` (Fly health check + self-ping target) and `POST /webhook` (Telegram update intake, delegated to `go-telegram/bot`'s `WebhookHandler` which validates the secret token header).
 
 Paths in `[build]` (`dockerfile`, `ignorefile`) are relative to `fly.toml`'s directory, NOT the repo root. Build context is the directory where `flyctl deploy` runs (repo root).
 
@@ -142,12 +148,37 @@ Local dev: put the same comma-separated list in `.env` as `MEDIABOT_ALLOWED_CHAT
 
 To get your own chat ID: message the bot once and grep `make logs` for `msg received chat=...` (or use `@userinfobot` in Telegram).
 
+### Webhook + zero-scale runbook
+
+First-time setup for a new environment:
+
+```sh
+# 1. Generate and register the webhook secret (only if not already set):
+flyctl secrets set TELEGRAM_WEBHOOK_SECRET="$(openssl rand -hex 32)" -c .infra/prod/fly.toml
+
+# 2. Deploy — the bot calls Telegram's setWebhook at boot using MEDIABOT_PUBLIC_URL:
+make deploy
+
+# 3. Verify Telegram accepted the registration:
+TOKEN=$(flyctl secrets list -c .infra/prod/fly.toml | awk '/TELEGRAM_BOT_TOKEN/ {print $2}')  # or use the value you set
+curl -s "https://api.telegram.org/bot${TOKEN}/getWebhookInfo" | jq .
+# → should show url = https://tg-audio-bot.fly.dev/webhook, has_custom_certificate=false, pending_update_count≈0
+```
+
+Sanity checks after change to zero-scale:
+- `flyctl status -c .infra/prod/fly.toml` shows `min_machines_running = 0` and the machine may be `stopped` between sessions.
+- Send a message → watch `make logs` for `webhook registered` then `msg received` within ~10s (cold start) or instantly (warm).
+- Kick off a >5-min download → logs show periodic inbound GETs to `/health` from the bot itself (keep-alive). Machine stays `started` until ~2-5 min after the last active work.
+
+Rollback to always-on (if auto-stop ever causes grief): set `min_machines_running = 1` and `auto_stop_machines = false` in `fly.toml`, redeploy. No code changes required.
+
 ### Open deployment items
 
-1. **First-boot grace period is 15s.** The bot currently boots in ~4s so this is fine, but if startup grows (eager Telegram API call, DB, etc.) bump `grace_period` in `fly.toml`.
-2. **No persistent volume.** In-flight downloads are lost on every redeploy. Acceptable per `plan.md`; users can re-send URLs.
-3. **`GO_VERSION` build arg vs `go.mod`.** Both say `1.26`. If `go.mod` bumps, bump the arg in `.infra/prod/fly.toml` at the same time.
-4. **CI token rotation.** `FLY_API_TOKEN` in GitHub secrets is scoped to the current Fly app. If the app is ever destroyed/recreated, re-issue with `flyctl tokens create deploy -c .infra/prod/fly.toml` and update the secret.
+1. **Cold-start latency.** First Telegram message after idle takes ~5–10s while Fly boots the VM. Acceptable for this bot; if it grows, profile boot or bump the VM to a paid CPU tier.
+2. **No persistent volume.** In-flight downloads are lost on every redeploy. Auto-stop does NOT cut mid-download thanks to the keep-alive self-ping; users can re-send URLs after any unexpected restart.
+3. **Stale quality-keyboard callbacks.** If the VM auto-stops while a user is staring at the keyboard and they tap a button after the machine starts, the in-memory `pending` map is empty and the tap is silently dropped (logged as `callback stale`). Acceptable; user re-sends URL. Happens more often than with the always-on deploy — watch for user complaints.
+4. **`GO_VERSION` build arg vs `go.mod`.** Both say `1.26`. If `go.mod` bumps, bump the arg in `.infra/prod/fly.toml` at the same time.
+5. **CI token rotation.** `FLY_API_TOKEN` in GitHub secrets is scoped to the current Fly app. If the app is ever destroyed/recreated, re-issue with `flyctl tokens create deploy -c .infra/prod/fly.toml` and update the secret.
 
 ## Reference patterns from the sibling `rag` workspace
 

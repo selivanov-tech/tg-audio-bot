@@ -1,5 +1,6 @@
 // Package main is the media bot entry point. It wires adapters to the
-// application layer and runs the Telegram polling loop until interrupted.
+// application layer and runs the Telegram webhook dispatcher until
+// interrupted.
 package main
 
 import (
@@ -40,11 +41,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// --- health server ------------------------------------------------------
-	// Fly.io hits GET /health every 30s. Without a 200 reply the machine is
-	// marked unhealthy and restarted.
-	healthSrv := startHealthServer(ctx)
-
 	// --- adapters -----------------------------------------------------------
 	registry := domain.NewProviderRegistry()
 	registry.Register(youtube.New(youtube.Config{
@@ -59,7 +55,7 @@ func main() {
 	//
 	// Simpler: construct messenger first with a deferred-binding handler.
 	var handler *application.Handler
-	bot, err := telegram.NewBot(cfg.TelegramBotToken, &lazyHandler{get: func() *application.Handler { return handler }})
+	bot, err := telegram.NewBot(cfg.TelegramBotToken, cfg.WebhookSecret, &lazyHandler{get: func() *application.Handler { return handler }})
 	if err != nil {
 		log.Fatalf("telegram: %v", err)
 	}
@@ -67,8 +63,14 @@ func main() {
 	svc := application.NewService(registry, bot, cfg.TempDir, cfg.MaxConcurrentDownload, cfg.MaxDurationMinutes, logger)
 	handler = application.NewHandler(svc, bot, logger, cfg.AllowedChatIDs)
 
-	// Register the Russian "/" command menu. Best-effort: log the error but
-	// don't fail startup — the bot still works without the menu hints.
+	// --- HTTP server --------------------------------------------------------
+	// Serves both /health (Fly health check) and /webhook (Telegram updates).
+	// Must start before RegisterWebhook so Telegram's first POST has somewhere
+	// to land.
+	httpSrv := startHTTPServer(bot.WebhookHandler())
+
+	// Register the "/" command menu. Best-effort: log the error but don't fail
+	// startup — the bot still works without the menu hints.
 	if err := bot.SetCommands(ctx, []port.Command{
 		{Command: "start", Description: "Помощь и примеры"},
 		{Command: "help", Description: "Как пользоваться ботом"},
@@ -77,23 +79,45 @@ func main() {
 		slog.Warn("set commands failed", "err", err)
 	}
 
+	// Tell Telegram where to POST updates. Idempotent — calling on every boot
+	// is safe and self-heals after any manual re-registration drift.
+	webhookURL := cfg.PublicURL + "/webhook"
+	if err := bot.RegisterWebhook(ctx, webhookURL, cfg.WebhookSecret); err != nil {
+		log.Fatalf("telegram: register webhook: %v", err)
+	}
+	slog.Info("webhook registered", "url", webhookURL)
+
+	// Keep-alive: while the queue has active downloads, ping /health over the
+	// Fly proxy every 2 min so auto-stop's idle timer doesn't fire mid-work.
+	keepAlive := application.NewKeepAlive(svc.Queue(), cfg.PublicURL, 0, logger)
+	go keepAlive.Run(ctx)
+
 	slog.Info("media-bot starting",
 		"max_concurrent", cfg.MaxConcurrentDownload,
 		"max_duration_min", cfg.MaxDurationMinutes,
 		"temp_dir", cfg.TempDir,
-		"allowed_chats", len(cfg.AllowedChatIDs))
+		"allowed_chats", len(cfg.AllowedChatIDs),
+		"public_url", cfg.PublicURL)
+	// Blocks on the webhook dispatcher goroutine, draining the internal
+	// updates channel populated by WebhookHandler until ctx is cancelled.
 	bot.Start(ctx)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = healthSrv.Shutdown(shutdownCtx)
+	_ = httpSrv.Shutdown(shutdownCtx)
 	slog.Info("media-bot shutdown")
 }
 
-// startHealthServer launches a minimal HTTP server on $PORT (default 8080)
-// that answers GET /health with 200 OK. It shuts down gracefully when ctx
-// is cancelled.
-func startHealthServer(ctx context.Context) *http.Server {
+// startHTTPServer launches the HTTP server on $PORT (default 8080). It
+// exposes:
+//
+//   - GET /health for Fly's health check (also hit by the keep-alive self-ping).
+//   - POST /webhook for Telegram updates, delegated to the library's handler
+//     which validates the X-Telegram-Bot-Api-Secret-Token header and enqueues
+//     the decoded update onto the internal dispatcher channel.
+//
+// The caller is responsible for calling Shutdown on ctx cancel.
+func startHTTPServer(webhookHandler http.Handler) *http.Server {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -103,6 +127,7 @@ func startHealthServer(ctx context.Context) *http.Server {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	mux.Handle("/webhook", webhookHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + port,
@@ -111,9 +136,9 @@ func startHealthServer(ctx context.Context) *http.Server {
 	}
 
 	go func() {
-		slog.Info("health server listening", "port", port)
+		slog.Info("http server listening", "port", port)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("health server", "err", err)
+			slog.Error("http server", "err", err)
 		}
 	}()
 
