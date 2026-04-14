@@ -64,7 +64,7 @@ func main() {
 		log.Fatalf("telegram: %v", err)
 	}
 
-	svc := application.NewService(registry, bot, cfg.TempDir, cfg.MaxConcurrentDownload, logger)
+	svc := application.NewService(registry, bot, cfg.TempDir, cfg.MaxConcurrentDownload, cfg.MaxDurationMinutes, logger)
 	handler = application.NewHandler(svc, bot, logger, cfg.AllowedChatIDs)
 
 	// Register the Russian "/" command menu. Best-effort: log the error but
@@ -79,6 +79,7 @@ func main() {
 
 	slog.Info("media-bot starting",
 		"max_concurrent", cfg.MaxConcurrentDownload,
+		"max_duration_min", cfg.MaxDurationMinutes,
 		"temp_dir", cfg.TempDir,
 		"allowed_chats", len(cfg.AllowedChatIDs))
 	bot.Start(ctx)

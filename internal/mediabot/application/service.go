@@ -38,11 +38,12 @@ const progressEditInterval = 2 * time.Second
 // quality selection, queueing, downloading with throttled progress, size
 // check, sending, and cleanup.
 type Service struct {
-	registry  *domain.ProviderRegistry
-	messenger port.Messenger
-	queue     *Queue
-	tempDir   string
-	log       *slog.Logger
+	registry    *domain.ProviderRegistry
+	messenger   port.Messenger
+	queue       *Queue
+	tempDir     string
+	maxDuration time.Duration // 0 = no limit (constructor enforces default)
+	log         *slog.Logger
 
 	pendingMu sync.Mutex
 	// pending is keyed by the keyboard message ID — when the user taps a
@@ -63,20 +64,26 @@ type Service struct {
 
 // NewService wires the service. The queue is built here because the service
 // itself is its Processor (the Queue calls back into svc.Process).
+// maxDurationMinutes < 1 falls back to 45 min — see Config.MaxDurationMinutes.
 func NewService(
 	registry *domain.ProviderRegistry,
 	messenger port.Messenger,
 	tempDir string,
 	maxConcurrent int,
+	maxDurationMinutes int,
 	logger *slog.Logger,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if maxDurationMinutes < 1 {
+		maxDurationMinutes = 45
+	}
 	s := &Service{
 		registry:     registry,
 		messenger:    messenger,
 		tempDir:      tempDir,
+		maxDuration:  time.Duration(maxDurationMinutes) * time.Minute,
 		log:          logger,
 		pending:      make(map[int]*domain.Download),
 		progress:     make(map[*domain.Download]*progressState),
@@ -130,6 +137,22 @@ func (s *Service) HandleURL(ctx context.Context, chatID int64, rawURL, customNam
 		"url", rawURL,
 		"title", info.Title,
 		"duration_ms", time.Since(fetchStart).Milliseconds())
+
+	// Duration gate: reject videos over the configured limit before creating
+	// a Download or showing the quality keyboard. info.Duration == 0 means
+	// the provider could not report a duration (livestream, metadata gap) —
+	// we let it through and the download stage will surface whatever fails.
+	if s.maxDuration > 0 && info.Duration > s.maxDuration {
+		limitMin := int(s.maxDuration / time.Minute)
+		actualMin := int((info.Duration + time.Minute - 1) / time.Minute) // round up
+		s.log.Warn("video rejected",
+			"chat", chatID,
+			"url", rawURL,
+			"duration_min", actualMin,
+			"limit_min", limitMin)
+		s.replaceOrSend(ctx, chatID, progressMsgID, MsgVideoTooLong(actualMin, limitMin))
+		return
+	}
 
 	d := domain.NewDownload(chatID, rawURL, provider.ID(), info)
 	if customName != "" {
