@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-The repository currently contains only `plan.md`. The Go code has not been written yet. `plan.md` is the source of truth for architecture, task breakdown, and acceptance criteria — read it before making decisions.
+Phase 1 code is landed (plan.md Tasks 1–12) and the bot is deployed to Fly.io at `tg-audio-bot.fly.dev`. `plan.md` remains the source of truth for architecture and acceptance criteria.
 
-Module path (once `go mod init` runs): `github.com/rag-brothers/media-bot`. Go version: `1.26`.
+Module path: `github.com/rag-brothers/media-bot`. Go version: `1.26`.
 
 ## What this is
 
@@ -14,13 +14,14 @@ A Telegram bot that downloads media from providers (Phase 1: YouTube audio via `
 
 ## Commands
 
-Once the project is initialized per Task 12, the expected commands are:
-
 ```
 go build ./cmd/media-bot         # build
 go test ./internal/mediabot/...  # run all tests
 go test ./internal/mediabot/infrastructure/provider/youtube -run TestParseProgressLine  # single test
 make run                         # go run ./cmd/media-bot (reads .env)
+make deploy                      # flyctl deploy --remote-only -c .infra/prod/fly.toml
+make logs                        # flyctl logs -a tg-audio-bot
+make ssh                         # flyctl ssh console -a tg-audio-bot
 ```
 
 Runtime prerequisite: `yt-dlp` must be on `PATH` (or set `YTDLP_PATH`).
@@ -65,6 +66,28 @@ All config via env (see Task 5):
 
 - Telegram: `github.com/go-telegram/bot` (actively maintained). Do **not** use `go-telegram-bot-api/telegram-bot-api/v5` — stale since 2021.
 - `yt-dlp` is invoked via `os/exec`, not as a library.
+
+## Deployment
+
+Production runs on Fly.io. Layout mirrors `/Volumes/Dev/code/shared/lms/math`:
+
+- `.infra/prod/Dockerfile` — two-stage build. `golang:1.26-bookworm` → `debian:bookworm-slim` with `ffmpeg`, `python3`, and a pinned `yt-dlp` binary (ARG `YTDLP_VERSION`). Bump the version arg when yt-dlp breaks on YouTube changes.
+- `.infra/prod/fly.toml` — app `tg-audio-bot`, region `fra`, 512MB shared-cpu-1x. `auto_stop_machines = false` and `min_machines_running = 1` because the per-user queue is in-memory and cannot survive suspension. Health check hits `/health` every 30s.
+- `.infra/prod/fly/entrypoint.sh` — runs every `/opt/fly/scripts/*.sh` hook then execs `media-bot`. Drop shell scripts into `.infra/prod/fly/scripts/` to extend (e.g. write cookies from a secret).
+- `.github/workflows/deploy.yml` — manual `workflow_dispatch` only. Runs `go vet` + `golangci-lint` + `go test ./internal/mediabot/...` before `flyctl deploy`, then smoke-checks `/health`.
+- `cmd/media-bot/main.go` serves `GET /health` on `$PORT` (default 8080) alongside the polling loop so Fly's HTTP check can pass.
+
+Paths in `[build]` (`dockerfile`, `ignorefile`) are relative to `fly.toml`'s directory, NOT the repo root. Build context is the directory where `flyctl deploy` runs (repo root).
+
+Fly config is always outside the default location, so every `flyctl` command for this app needs `-c .infra/prod/fly.toml` (except `-a tg-audio-bot` commands like `logs`/`ssh`).
+
+### Open deployment items
+
+1. **First-boot grace period is 15s.** The bot currently boots in ~4s so this is fine, but if startup grows (eager Telegram API call, DB, etc.) bump `grace_period` in `fly.toml`.
+2. **Cookies plumbing is not wired.** `YTDLP_COOKIES_PATH` config exists in code but no secret is set on Fly. When an age-restricted video fails, add a Fly secret `YTDLP_COOKIES` and a `fly/scripts/01-cookies.sh` hook that writes it to a path referenced by `YTDLP_COOKIES_PATH`. A volume is needed if cookies should persist across restarts.
+3. **No persistent volume.** In-flight downloads are lost on every redeploy. Acceptable per `plan.md`; users can re-send URLs.
+4. **`GO_VERSION` build arg vs `go.mod`.** Both say `1.26`. If `go.mod` bumps, bump the arg in `.infra/prod/fly.toml` at the same time.
+5. **CI token rotation.** `FLY_API_TOKEN` in GitHub secrets is scoped to the current Fly app. If the app is ever destroyed/recreated, re-issue with `flyctl tokens create deploy -c .infra/prod/fly.toml` and update the secret.
 
 ## Reference patterns from the sibling `rag` workspace
 
