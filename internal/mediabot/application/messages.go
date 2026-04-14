@@ -25,6 +25,7 @@ const (
 	MsgSending          = "Отправляю аудио..."
 	MsgSendFailed       = "Не удалось отправить аудио. Попробуйте ещё раз."
 	MsgInternalError = "Внутренняя ошибка. Попробуйте ещё раз."
+	MsgAccessDenied  = "Доступ к боту ограничен."
 )
 
 // QualityLabel returns the user-facing button text for a quality tier.
