@@ -65,7 +65,7 @@ func main() {
 	}
 
 	svc := application.NewService(registry, bot, cfg.TempDir, cfg.MaxConcurrentDownload, logger)
-	handler = application.NewHandler(svc, bot, logger)
+	handler = application.NewHandler(svc, bot, logger, cfg.AllowedChatIDs)
 
 	// Register the Russian "/" command menu. Best-effort: log the error but
 	// don't fail startup — the bot still works without the menu hints.
@@ -79,7 +79,8 @@ func main() {
 
 	slog.Info("media-bot starting",
 		"max_concurrent", cfg.MaxConcurrentDownload,
-		"temp_dir", cfg.TempDir)
+		"temp_dir", cfg.TempDir,
+		"allowed_chats", len(cfg.AllowedChatIDs))
 	bot.Start(ctx)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

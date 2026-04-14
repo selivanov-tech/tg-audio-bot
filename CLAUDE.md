@@ -65,6 +65,7 @@ All config via env (see Task 5):
 - `YTDLP_COOKIES_PATH` — optional; when set, passed as `--cookies` to both FetchInfo and Download (needed for some age-/region-restricted YouTube videos)
 - `MEDIABOT_TEMP_DIR` — default `os.TempDir()+"/mediabot"`
 - `MEDIABOT_MAX_CONCURRENT_DOWNLOADS` — default 3
+- `MEDIABOT_ALLOWED_CHAT_IDS` — **required**, comma-separated chat IDs. Empty/unset = boot fails with `ErrEmptyAllowlist` (deny-all by design). Group chat IDs are negative. See "Allowlist runbook" below.
 
 ## Third-party libs
 
@@ -114,6 +115,29 @@ flyctl secrets unset YTDLP_COOKIES -c .infra/prod/fly.toml
 ```
 
 `cookies.txt` is gitignored — safe to keep in the repo root while setting the secret.
+
+### Allowlist runbook
+
+The bot rejects any chat ID not in `MEDIABOT_ALLOWED_CHAT_IDS` with `MsgAccessDenied` ("Доступ к боту ограничен."). Empty/unset = boot fails — there is no allow-all mode.
+
+Source of truth is `allowed_chat_ids.txt` in the repo root (gitignored). Format: one chat ID per line, blanks and `# comments` ignored, group chats are negative IDs:
+
+```
+# Sergei
+12345678
+# Some group
+-1234567890
+```
+
+Sync to Fly:
+```sh
+make sync-allowlist     # parses the txt, sets MEDIABOT_ALLOWED_CHAT_IDS as a Fly secret
+```
+The secret update auto-redeploys the app. Adding/removing a user means: edit the txt, run `make sync-allowlist`, wait ~1 min for the new machine.
+
+Local dev: put the same comma-separated list in `.env` as `MEDIABOT_ALLOWED_CHAT_IDS=12345678,87654321`. `make run` sources `.env`. Without it the bot won't start.
+
+To get your own chat ID: message the bot once and grep `make logs` for `msg received chat=...` (or use `@userinfobot` in Telegram).
 
 ### Open deployment items
 
