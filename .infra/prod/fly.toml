@@ -39,6 +39,6 @@ primary_region = 'fra'
     path = '/health'
 
 [[vm]]
-  memory = '512mb'
+  memory = '1Gb'
   cpu_kind = 'shared'
   cpus = 1
