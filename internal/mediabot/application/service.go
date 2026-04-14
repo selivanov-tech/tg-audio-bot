@@ -113,15 +113,23 @@ func (s *Service) HandleURL(ctx context.Context, chatID int64, rawURL, customNam
 	}
 
 	s.log.Info("fetch info start", "chat", chatID, "url", rawURL)
-	fetchCtx, cancel := context.WithTimeout(ctx, fetchInfoTimeout)
-	info, err := provider.FetchInfo(fetchCtx, rawURL)
-	cancel()
-	<-s.fetchInfoSem
+	fetchStart := time.Now()
+	info, err := func() (domain.MediaInfo, error) {
+		defer func() { <-s.fetchInfoSem }()
+		fetchCtx, cancel := context.WithTimeout(ctx, fetchInfoTimeout)
+		defer cancel()
+		return provider.FetchInfo(fetchCtx, rawURL)
+	}()
 	if err != nil {
 		s.log.Error("fetch info failed", "chat", chatID, "url", rawURL, "err", err)
 		s.replaceOrSend(ctx, chatID, progressMsgID, MapUserError(StageFetch, err))
 		return
 	}
+	s.log.Info("fetch info ok",
+		"chat", chatID,
+		"url", rawURL,
+		"title", info.Title,
+		"duration_ms", time.Since(fetchStart).Milliseconds())
 
 	d := domain.NewDownload(chatID, rawURL, provider.ID(), info)
 	if customName != "" {
@@ -139,8 +147,8 @@ func (s *Service) HandleURL(ctx context.Context, chatID int64, rawURL, customNam
 		_ = s.messenger.DeleteMessage(ctx, chatID, progressMsgID)
 	}
 	kbMsgID, err := s.messenger.SendOptionsKeyboard(ctx, chatID, header+"\n\n"+MsgChooseQuality, []port.KeyboardOption{
-		{Label: domain.QualityBest.Label(), CallbackData: "quality:" + domain.QualityBest.String()},
-		{Label: domain.QualityGood.Label(), CallbackData: "quality:" + domain.QualityGood.String()},
+		{Label: QualityLabel(domain.QualityBest), CallbackData: "quality:" + domain.QualityBest.String()},
+		{Label: QualityLabel(domain.QualityGood), CallbackData: "quality:" + domain.QualityGood.String()},
 	})
 	if err != nil {
 		return
@@ -183,7 +191,7 @@ func (s *Service) HandleQualitySelection(ctx context.Context, chatID int64, q do
 	if position > 1 {
 		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, MsgQueued(position))
 	} else {
-		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, MsgProgressDownloading(0, "", "", ""))
+		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, RenderProgress(domain.Progress{}))
 	}
 }
 
@@ -213,7 +221,7 @@ func (s *Service) Process(ctx context.Context, d *domain.Download) {
 	}
 	// If we were queued, the message still says "Queued...". Reset it.
 	if st != nil {
-		_ = s.messenger.EditText(ctx, chatID, st.msgID, MsgProgressDownloading(0, "", "", ""))
+		_ = s.messenger.EditText(ctx, chatID, st.msgID, RenderProgress(domain.Progress{}))
 		st.mu.Lock()
 		st.lastEdit = time.Now()
 		st.mu.Unlock()
@@ -306,7 +314,7 @@ func (s *Service) progressCallback(ctx context.Context, chatID int64, st *progre
 		if !should {
 			return
 		}
-		_ = s.messenger.EditText(ctx, chatID, msgID, p.DisplayString())
+		_ = s.messenger.EditText(ctx, chatID, msgID, RenderProgress(p))
 	}
 }
 
