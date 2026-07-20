@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG GO_VERSION=1.26
-ARG YTDLP_VERSION=2026.03.17
+ARG YTDLP_VERSION=2026.07.04
 ARG DENO_VERSION=v2.7.12
 
 # --- Stage 1: build the Go binary ---------------------------------------------
