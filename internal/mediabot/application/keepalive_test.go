@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/domain"
 )
 
 // TestKeepAlive_SkipsWhenIdle verifies the gate: with no active work the

@@ -13,7 +13,7 @@ import (
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/application/port"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/application/port"
 )
 
 // UpdateHandler is what the application provides so the adapter can deliver

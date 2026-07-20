@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/application/port"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/application/port"
 )
 
 // fakeMessenger records SendText calls. Other methods are stubbed: the

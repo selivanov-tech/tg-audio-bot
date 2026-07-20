@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/domain"
 )
 
 // yt-dlp writes progress to stderr. Typical line shapes:

@@ -1,9 +1,15 @@
 # Excludes from the production build context.
 
 # 1. Secrets & local state
+# Keep this list in sync with .gitignore — the two are independent, and the
+# builder stage does `COPY . .`, so anything missing here is uploaded to the
+# remote builder even when git ignores it.
 **/.env
 **/.env.*
 **/plan.md
+**/cookies.txt
+**/*.cookies.txt
+**/allowed_chat_ids.txt
 
 # 2. Build artifacts & local runs
 /media-bot

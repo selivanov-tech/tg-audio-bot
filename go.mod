@@ -1,4 +1,4 @@
-module github.com/rag-brothers/media-bot
+module github.com/selivanov-tech/tg-audio-bot
 
 go 1.26
 

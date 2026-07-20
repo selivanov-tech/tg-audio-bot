@@ -1,10 +1,14 @@
 # fly.toml — production config for the Telegram bot.
 # See https://fly.io/docs/reference/configuration/
 #
-# Deploy:  flyctl deploy --remote-only -c .infra/prod/fly.toml
+# Deploy:  make deploy   (reads FLY_APP from .env)
 # Build context is the repo root, so all [build] paths are relative to there.
+#
+# The `app` key is deliberately absent so this public repo does not name the
+# deployment. flyctl takes the app name from `-a` / $FLY_APP instead, and
+# prefers that over any name in this file. Every flyctl command for this repo
+# therefore needs an app name; the Makefile targets supply it.
 
-app = '<fly-app>'
 primary_region = 'fra'
 
 [build]
@@ -18,8 +22,9 @@ primary_region = 'fra'
   MEDIABOT_TEMP_DIR = '/tmp/mediabot'
   MEDIABOT_MAX_CONCURRENT_DOWNLOADS = '3'
   YTDLP_PATH = '/usr/local/bin/yt-dlp'
-  # Public base URL, used for webhook registration and keep-alive self-ping.
-  MEDIABOT_PUBLIC_URL = 'https://example.fly.dev'
+  # MEDIABOT_PUBLIC_URL (base URL for webhook registration and the keep-alive
+  # self-ping) is set as a Fly secret, not here, so the public repo does not
+  # name the deployment. See the deployment runbook in CLAUDE.md.
 
 # Webhook-driven bot with zero-scale: machine stops on HTTP idle and Fly's
 # proxy auto-starts it on the next Telegram webhook POST. The bot's keep-alive

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/application/port"
-	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/application/port"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/domain"
 )
 
 // fakeProvider returns a fixed MediaInfo from FetchInfo. Download is not

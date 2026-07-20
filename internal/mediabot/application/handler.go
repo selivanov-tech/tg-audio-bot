@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/application/port"
-	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/application/port"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/domain"
 )
 
 // Handler routes Telegram updates to the Service. It satisfies

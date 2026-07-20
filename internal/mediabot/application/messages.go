@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/domain"
 )
 
 // Russian user-facing strings. Single source of truth — edit here, not at

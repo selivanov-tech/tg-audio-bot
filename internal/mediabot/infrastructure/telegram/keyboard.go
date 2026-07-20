@@ -3,7 +3,7 @@ package telegram
 import (
 	"github.com/go-telegram/bot/models"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/application/port"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/application/port"
 )
 
 // buildInlineKeyboard converts a flat list of options into a one-row inline

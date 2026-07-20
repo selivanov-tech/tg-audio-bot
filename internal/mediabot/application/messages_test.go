@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/domain"
 )
 
 func TestMapUserError_Nil(t *testing.T) {

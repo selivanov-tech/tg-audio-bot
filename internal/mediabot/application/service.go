@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/application/port"
-	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/application/port"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/domain"
 )
 
 // maxTelegramAudioBytes is the hard limit for sendAudio via the default Bot

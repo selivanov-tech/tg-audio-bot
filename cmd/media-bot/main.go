@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rag-brothers/media-bot/internal/mediabot/application"
-	"github.com/rag-brothers/media-bot/internal/mediabot/application/port"
-	"github.com/rag-brothers/media-bot/internal/mediabot/domain"
-	"github.com/rag-brothers/media-bot/internal/mediabot/infrastructure/config"
-	"github.com/rag-brothers/media-bot/internal/mediabot/infrastructure/provider/youtube"
-	"github.com/rag-brothers/media-bot/internal/mediabot/infrastructure/telegram"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/application"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/application/port"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/domain"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/infrastructure/config"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/infrastructure/provider/youtube"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/infrastructure/telegram"
 )
 
 func main() {

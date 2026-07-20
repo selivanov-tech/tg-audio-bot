@@ -27,7 +27,7 @@ type Config struct {
 	AllowedChatIDs     map[int64]struct{}
 
 	// PublicURL is the externally reachable base URL of this bot (no trailing
-	// slash), e.g. "https://example.fly.dev". Used for two things:
+	// slash), e.g. "https://your-app.fly.dev". Used for two things:
 	// (1) webhook registration with Telegram — "${PublicURL}/webhook"
 	// (2) keep-alive self-ping while downloads are active — "${PublicURL}/health"
 	// via the Fly proxy so the auto-stop idle timer resets.
@@ -49,7 +49,7 @@ var ErrEmptyAllowlist = errors.New("MEDIABOT_ALLOWED_CHAT_IDS is required and mu
 
 // ErrMissingPublicURL is returned when MEDIABOT_PUBLIC_URL is unset. The
 // webhook transport has no polling fallback, so we fail loud at boot.
-var ErrMissingPublicURL = errors.New("MEDIABOT_PUBLIC_URL is required (e.g. https://example.fly.dev)")
+var ErrMissingPublicURL = errors.New("MEDIABOT_PUBLIC_URL is required (e.g. https://your-app.fly.dev)")
 
 // ErrMissingWebhookSecret is returned when TELEGRAM_WEBHOOK_SECRET is unset.
 // Without it the /webhook endpoint is publicly POST-able by anyone.
