@@ -41,6 +41,21 @@ func New(cfg Config) *Provider {
 
 func (p *Provider) ID() domain.ProviderID { return ProviderID }
 
+// playerClients pins yt-dlp's YouTube client order.
+//
+// yt-dlp picks its default clients based on whether cookies authenticate the
+// session. Unauthenticated it uses android_vr/visionos, which need no JS player
+// and still serve plain HTTPS audio formats. As soon as login cookies are
+// present it switches to the authed set (tv_downgraded, web_safari) — both of
+// which YouTube serves via SABR, so format selection intermittently dies with
+// "Requested format is not available". Because YTDLP_COOKIES is set in prod,
+// every request took that path.
+//
+// Listing the JS-free clients first keeps extraction working for ordinary
+// videos while `default` stays as a fallback for the age-restricted ones the
+// cookies were added for in the first place.
+const playerClients = "youtube:player_client=android_vr,visionos,default"
+
 // hostRe matches the host portion of a YouTube URL. Kept deliberately simple:
 // we accept youtu.be, (www.|m.)?youtube.com, and youtube.com/shorts/...
 var hostRe = regexp.MustCompile(`(?i)^(?:https?://)?(?:www\.|m\.)?(youtube\.com|youtu\.be)(?:/|$)`)
@@ -53,8 +68,8 @@ func (p *Provider) MatchesURL(rawURL string) bool {
 // Output: two lines on stdout, one per --print flag.
 func (p *Provider) FetchInfo(ctx context.Context, url string) (domain.MediaInfo, error) {
 	args := []string{
-		"--no-warnings",
 		"--no-download",
+		"--extractor-args", playerClients,
 		"--print", "%(title)s",
 		"--print", "%(duration_string)s",
 	}
@@ -97,9 +112,9 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 	outTmpl := filepath.Join(opts.OutputDir, stem+".%(ext)s")
 
 	args := []string{
-		"--no-warnings",
 		"--no-playlist",
 		"--newline",
+		"--extractor-args", playerClients,
 		"-x", // extract audio
 		"-o", outTmpl,
 	}
@@ -107,9 +122,19 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 	case domain.QualityBest:
 		// m4a (AAC), not opus: Telegram classifies .opus as a voice message
 		// and rejects with VOICE_MESSAGES_FORBIDDEN when the recipient has
-		// voice messages disabled. AAC is served natively by YouTube so this
-		// is usually extract-only, no transcode.
-		args = append(args, "--audio-format", "m4a", "--audio-quality", "0")
+		// voice messages disabled.
+		//
+		// The format selector is what makes this extract-only. yt-dlp's
+		// default `bestaudio` prefers opus (equal bitrate, higher score), so
+		// `--audio-format m4a` alone always re-encodes opus → AAC — and with
+		// `--audio-quality 0` that re-encode lands around 400 kbps, ~3x the
+		// size of YouTube's own 129 kbps AAC track for no quality gain (a
+		// re-encode cannot add any). Naming the m4a track instead makes
+		// yt-dlp print "Not converting audio" and just remux, which also
+		// skips a multi-minute ffmpeg pass on the 512 MB VM. The
+		// `/bestaudio` fallback keeps the rare videos with no m4a track
+		// working; those still transcode.
+		args = append(args, "-f", "bestaudio[ext=m4a]/bestaudio", "--audio-format", "m4a")
 	case domain.QualityGood:
 		args = append(args, "--audio-format", "mp3", "--audio-quality", "128K")
 	default:
@@ -273,13 +298,21 @@ func lastLine(buf *bytes.Buffer) string {
 	return lastLineStr(buf.String())
 }
 
+// lastLineStr returns the tail of yt-dlp's stderr. It keeps several lines, not
+// just the final one: yt-dlp reports the actionable cause (skipped clients,
+// SABR-only formats, missing PO token) as WARNING lines *above* the terminal
+// ERROR, so keeping only the last line hides why extraction failed.
 func lastLineStr(s string) string {
-	s = strings.TrimRight(s, "\n")
-	if s == "" {
-		return ""
+	lines := make([]string, 0, stderrTailLines)
+	for _, l := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
 	}
-	if i := strings.LastIndex(s, "\n"); i >= 0 {
-		return s[i+1:]
+	if len(lines) > stderrTailLines {
+		lines = lines[len(lines)-stderrTailLines:]
 	}
-	return s
+	return strings.Join(lines, " | ")
 }
+
+const stderrTailLines = 4
