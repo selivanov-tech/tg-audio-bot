@@ -1,4 +1,4 @@
-.PHONY: run build test vet deploy logs ssh sync-allowlist require-app
+.PHONY: run build test test-live vet deploy logs ssh sync-allowlist require-app
 
 # The Fly app name is deliberately not committed, so `fly.toml` has no `app`
 # key and every flyctl call must pass `-a`. Set FLY_APP in .env (gitignored)
@@ -16,6 +16,17 @@ build:
 
 test:
 	go test ./internal/mediabot/...
+
+# Real yt-dlp, real routing, no Telegram: prints every message the bot would
+# send and saves the audio. Needs URL=<youtube link>; see cmd/media-bot/live_test.go.
+# MINUTES overrides the duration gate (the .env value is a dev knob, often 1);
+# TEXT routes a full message instead of a bare URL, e.g. TEXT="/download <url> My Name".
+MINUTES ?= 45
+test-live:
+	@test -n "$(URL)" || { echo 'usage: make test-live URL="https://www.youtube.com/watch?v=..."'; exit 1; }
+	set -a; [ -f .env ] && . ./.env; set +a; \
+	URL="$(URL)" LIVE_TEXT="$(TEXT)" MEDIABOT_MAX_DURATION_MINUTES="$(MINUTES)" \
+	go test -tags live -v -timeout 20m -count 1 -run TestLiveDownload ./cmd/media-bot
 
 vet:
 	go vet ./...

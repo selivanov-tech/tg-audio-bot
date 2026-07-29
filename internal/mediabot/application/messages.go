@@ -16,16 +16,16 @@ import (
 const (
 	MsgHelp = "Отправьте ссылку на YouTube — я скачаю аудио.\n\n" +
 		"Можно задать имя файла: /download <url> <имя>"
-	MsgDownloadUsage    = "Как использовать: /download <url> [имя]"
-	MsgUnsupportedURL   = "Ссылка не поддерживается. Сейчас доступен только YouTube."
-	MsgRouteFailed      = "Не удалось обработать ссылку. Попробуйте ещё раз."
-	MsgFetching         = "Получаю информацию о видео..."
-	MsgChooseQuality    = "Выберите качество:"
-	MsgStaleSelection   = "Эта кнопка больше не активна. Отправьте ссылку ещё раз."
-	MsgSending          = "Отправляю аудио..."
-	MsgSendFailed       = "Не удалось отправить аудио. Попробуйте ещё раз."
-	MsgInternalError = "Внутренняя ошибка. Попробуйте ещё раз."
-	MsgAccessDenied  = "Доступ к боту ограничен."
+	MsgDownloadUsage     = "Как использовать: /download <url> [имя]"
+	MsgUnsupportedURL    = "Ссылка не поддерживается. Сейчас доступен только YouTube."
+	MsgRouteFailed       = "Не удалось обработать ссылку. Попробуйте ещё раз."
+	MsgFetching          = "Получаю информацию о видео..."
+	MsgRetryLowerQuality = "Попробовать в MP3? Файл будет меньше."
+	MsgStaleSelection    = "Эта кнопка больше не активна. Отправьте ссылку ещё раз."
+	MsgSending           = "Отправляю аудио..."
+	MsgSendFailed        = "Не удалось отправить аудио. Попробуйте ещё раз."
+	MsgInternalError     = "Внутренняя ошибка. Попробуйте ещё раз."
+	MsgAccessDenied      = "Доступ к боту ограничен."
 )
 
 // QualityLabel returns the user-facing button text for a quality tier.
@@ -71,14 +71,11 @@ func MsgVideoTooLong(actualMin, limitMin int) string {
 		actualMin, limitMin)
 }
 
-// MsgTooLarge renders the 50MB-limit rejection. suggestGood is true when the
-// user picked Best quality and Good might fit under the cap.
-func MsgTooLarge(sizeMB int64, suggestGood bool) string {
-	msg := fmt.Sprintf("Файл %d МБ — превышает лимит Telegram в 50 МБ.", sizeMB)
-	if suggestGood {
-		msg += " Попробуйте качество «Хорошее»."
-	}
-	return msg
+// MsgTooLarge renders the 50MB-limit rejection. When the file came from the
+// Best tier, the MP3 retry is offered separately via MsgRetryLowerQuality and
+// its keyboard, so no advice is baked in here.
+func MsgTooLarge(sizeMB int64) string {
+	return fmt.Sprintf("Файл %d МБ — превышает лимит Telegram в 50 МБ.", sizeMB)
 }
 
 // Stage identifies which lifecycle phase produced an error, so MapUserError

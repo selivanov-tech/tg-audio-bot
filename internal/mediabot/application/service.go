@@ -166,33 +166,63 @@ func (s *Service) HandleURL(ctx context.Context, chatID int64, rawURL, customNam
 		d.SetCustomName(customName)
 	}
 
-	header := info.Title
-	if d.EffectiveFilename() != info.Title {
-		header = d.EffectiveFilename() + " (" + info.Title + ")"
-	}
-
-	// Delete the "Fetching..." placeholder, then send the keyboard as a new
-	// message so we can track it by ID for the callback.
-	if progressMsgID != 0 {
-		_ = s.messenger.DeleteMessage(ctx, chatID, progressMsgID)
-	}
-	kbMsgID, err := s.messenger.SendOptionsKeyboard(ctx, chatID, header+"\n\n"+MsgChooseQuality, []port.KeyboardOption{
-		{Label: QualityLabel(domain.QualityBest), CallbackData: "quality:" + domain.QualityBest.String()},
-		{Label: QualityLabel(domain.QualityGood), CallbackData: "quality:" + domain.QualityGood.String()},
-	})
-	if err != nil {
+	// The user is never asked for a quality tier: Best starts right away. The
+	// Good tier stays reachable through offerLowerQuality, which is the only
+	// case where the choice actually matters (Best overflowed Telegram's cap).
+	if err := d.SelectQuality(domain.QualityBest); err != nil {
+		s.log.Error("select default quality failed", "chat", chatID, "err", err)
+		s.replaceOrSend(ctx, chatID, progressMsgID, MsgInternalError)
 		return
 	}
+	// Reuse the "Fetching..." placeholder as the status message.
+	s.enqueue(ctx, d, progressMsgID)
+}
 
-	s.pendingMu.Lock()
-	s.pending[kbMsgID] = d
-	s.pendingMu.Unlock()
+// enqueue puts a download whose quality is already chosen on the user's queue
+// and adopts msgID as its status message (0 = we have no message to edit, so
+// later status goes out as fresh messages).
+func (s *Service) enqueue(ctx context.Context, d *domain.Download, msgID int) {
+	chatID := d.ChatID()
+
+	var st *progressState
+	if msgID != 0 {
+		st = &progressState{msgID: msgID, header: downloadHeader(d)}
+		s.progressMu.Lock()
+		s.progress[d] = st
+		s.progressMu.Unlock()
+	}
+
+	position := s.queue.Enqueue(ctx, d)
+	s.log.Info("queued",
+		"chat", chatID,
+		"url", d.URL(),
+		"quality", d.Quality().String(),
+		"position", position)
+	if st == nil {
+		return
+	}
+	if position > 1 {
+		_ = s.messenger.EditText(ctx, chatID, msgID, st.render(MsgQueued(position)))
+	} else {
+		_ = s.messenger.EditText(ctx, chatID, msgID, st.render(RenderProgress(domain.Progress{})))
+	}
+}
+
+// downloadHeader is the title line kept above every status message so a user
+// with several downloads in flight can tell which one a message belongs to.
+func downloadHeader(d *domain.Download) string {
+	title := d.Info().Title
+	if name := d.EffectiveFilename(); name != title {
+		return name + " (" + title + ")"
+	}
+	return title
 }
 
 // HandleQualitySelection is called from the message router when the user taps
-// a quality button. keyboardMsgID is the ID of the message whose button was
-// tapped (used both to find the pending Download and as the message we will
-// edit with progress updates).
+// a quality button. The happy path never shows one — the only keyboard left is
+// the MP3 retry from offerLowerQuality. keyboardMsgID is the ID of the message
+// whose button was tapped (used both to find the pending Download and as the
+// message we will edit with progress updates).
 func (s *Service) HandleQualitySelection(ctx context.Context, chatID int64, q domain.Quality, keyboardMsgID int) {
 	s.pendingMu.Lock()
 	d, ok := s.pending[keyboardMsgID]
@@ -210,27 +240,25 @@ func (s *Service) HandleQualitySelection(ctx context.Context, chatID int64, q do
 		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, MsgStaleSelection)
 		return
 	}
-	// Reuse the keyboard message for progress updates — we stash its ID on
-	// the Download by wrapping it in a small struct via pendingProgress.
-	s.progressMu.Lock()
-	s.progress[d] = &progressState{msgID: keyboardMsgID}
-	s.progressMu.Unlock()
-
-	position := s.queue.Enqueue(ctx, d)
-	s.log.Info("queued", "chat", chatID, "url", d.URL(), "position", position)
-	if position > 1 {
-		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, MsgQueued(position))
-	} else {
-		_ = s.messenger.EditText(ctx, chatID, keyboardMsgID, RenderProgress(domain.Progress{}))
-	}
+	// Reuse the keyboard message for progress updates.
+	s.enqueue(ctx, d, keyboardMsgID)
 }
 
-// progressState holds per-download UI state: the message we edit and the
-// throttle timestamp for progress edits.
+// progressState holds per-download UI state: the message we edit, the title
+// line prefixed to every status text, and the throttle timestamp.
 type progressState struct {
 	mu       sync.Mutex
 	msgID    int
+	header   string // immutable after construction, so read without the lock
 	lastEdit time.Time
+}
+
+// render prefixes a status line with the download's title.
+func (st *progressState) render(body string) string {
+	if st.header == "" {
+		return body
+	}
+	return st.header + "\n\n" + body
 }
 
 // The progress map is on Service rather than Download because UI state does
@@ -251,7 +279,7 @@ func (s *Service) Process(ctx context.Context, d *domain.Download) {
 	}
 	// If we were queued, the message still says "Queued...". Reset it.
 	if st != nil {
-		_ = s.messenger.EditText(ctx, chatID, st.msgID, RenderProgress(domain.Progress{}))
+		_ = s.messenger.EditText(ctx, chatID, st.msgID, st.render(RenderProgress(domain.Progress{})))
 		st.mu.Lock()
 		st.lastEdit = time.Now()
 		st.mu.Unlock()
@@ -303,14 +331,17 @@ func (s *Service) Process(ctx context.Context, d *domain.Download) {
 	}
 	sizeMB := stat.Size() / (1024 * 1024)
 	if stat.Size() > maxTelegramAudioBytes {
-		msg := MsgTooLarge(sizeMB, d.Quality() == domain.QualityBest)
-		s.failDownload(ctx, d, domain.ErrFileTooLarge, msg)
+		canRetry := d.Quality() == domain.QualityBest
+		s.failDownload(ctx, d, domain.ErrFileTooLarge, MsgTooLarge(sizeMB))
+		if canRetry {
+			s.offerLowerQuality(ctx, d)
+		}
 		return
 	}
 	s.log.Info("download ok", "chat", chatID, "url", d.URL(), "size_mb", sizeMB)
 
 	if st != nil {
-		_ = s.messenger.EditText(ctx, chatID, st.msgID, MsgSending)
+		_ = s.messenger.EditText(ctx, chatID, st.msgID, st.render(MsgSending))
 	}
 	s.log.Info("send start", "chat", chatID, "size_mb", sizeMB)
 	if err := s.messenger.SendAudio(ctx, chatID, filePath, d.EffectiveFilename()); err != nil {
@@ -344,8 +375,32 @@ func (s *Service) progressCallback(ctx context.Context, chatID int64, st *progre
 		if !should {
 			return
 		}
-		_ = s.messenger.EditText(ctx, chatID, msgID, RenderProgress(p))
+		_ = s.messenger.EditText(ctx, chatID, msgID, st.render(RenderProgress(p)))
 	}
+}
+
+// offerLowerQuality gives the user a one-tap MP3 retry after a Best-quality
+// file overflowed Telegram's size limit. Since the happy path no longer asks
+// for a tier, this keyboard is the only route to the Good tier — the retry is
+// a fresh aggregate because the failed one is in a terminal state.
+func (s *Service) offerLowerQuality(ctx context.Context, failed *domain.Download) {
+	chatID := failed.ChatID()
+	retry := domain.NewDownload(chatID, failed.URL(), failed.Provider(), failed.Info())
+	if name := failed.EffectiveFilename(); name != failed.Info().Title {
+		retry.SetCustomName(name)
+	}
+
+	msgID, err := s.messenger.SendOptionsKeyboard(ctx, chatID, MsgRetryLowerQuality, []port.KeyboardOption{
+		{Label: QualityLabel(domain.QualityGood), CallbackData: "quality:" + domain.QualityGood.String()},
+	})
+	if err != nil {
+		s.log.Error("retry keyboard failed", "chat", chatID, "err", err)
+		return
+	}
+
+	s.pendingMu.Lock()
+	s.pending[msgID] = retry
+	s.pendingMu.Unlock()
 }
 
 // failDownload handles the error branches uniformly: log state transition,
@@ -360,7 +415,7 @@ func (s *Service) failDownload(ctx context.Context, d *domain.Download, cause er
 		"err", cause)
 	st := s.progressStateFor(d)
 	if st != nil {
-		_ = s.messenger.EditText(ctx, chatID, st.msgID, userMsg)
+		_ = s.messenger.EditText(ctx, chatID, st.msgID, st.render(userMsg))
 	} else {
 		_, _ = s.messenger.SendText(ctx, chatID, userMsg)
 	}
@@ -391,4 +446,3 @@ func (s *Service) replaceOrSend(ctx context.Context, chatID int64, msgID int, te
 	}
 	_, _ = s.messenger.SendText(ctx, chatID, text)
 }
-

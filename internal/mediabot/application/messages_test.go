@@ -94,13 +94,9 @@ func TestMsgQueued(t *testing.T) {
 }
 
 func TestMsgTooLarge(t *testing.T) {
-	with := MsgTooLarge(170, true)
-	without := MsgTooLarge(170, false)
-	if !strings.Contains(with, "170") || !strings.Contains(with, "«Хорошее»") {
-		t.Errorf("want size + suggestion, got %q", with)
-	}
-	if strings.Contains(without, "«Хорошее»") {
-		t.Errorf("did not want suggestion when suggestGood=false, got %q", without)
+	got := MsgTooLarge(170)
+	if !strings.Contains(got, "170") || !strings.Contains(got, "50") {
+		t.Errorf("want actual size + the limit, got %q", got)
 	}
 }
 

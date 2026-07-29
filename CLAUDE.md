@@ -50,7 +50,7 @@ These are easy to get wrong without reading multiple files together:
 
 4. **`Download` is a state machine.** States: `AwaitingQuality → Queued → Downloading → Sending → Complete` (or `Failed`). Transitions go through `MarkQueued()`, `MarkDownloading()`, etc., which return `ErrInvalidState` on illegal moves. Don't mutate state fields directly.
 
-5. **Telegram 50MB file limit is a hard constraint.** The service checks file size after download and surfaces a user-facing error suggesting Good (MP3) quality when Best (M4A/AAC) exceeds the limit. This is a default-Bot-API assumption; a local Bot API server would lift it to 2GB (out of scope). Note: we deliberately do NOT use opus — Telegram classifies `.opus` uploads as voice messages, which some users block via privacy settings (`VOICE_MESSAGES_FORBIDDEN`).
+5. **Telegram 50MB file limit is a hard constraint.** The service checks file size after download; when a Best (M4A/AAC) file exceeds the limit it shows the size error and then `offerLowerQuality` — the MP3 retry keyboard (see point 12). This is a default-Bot-API assumption; a local Bot API server would lift it to 2GB (out of scope). Note: we deliberately do NOT use opus — Telegram classifies `.opus` uploads as voice messages, which some users block via privacy settings (`VOICE_MESSAGES_FORBIDDEN`). Best therefore asks for YouTube's native AAC track by selector (`-f bestaudio[ext=m4a]/bestaudio`) and passes no `--audio-quality`: without the selector yt-dlp picks opus and re-encodes it to AAC at ~400 kbps, which triples the file (a 4:27 track went 4.3 MB → 12.7 MB) and moves the 50 MB cap from ~45 min of audio down to ~17. Don't "simplify" the selector away.
 
 6. **Domain errors are exhaustive.** `ErrUnsupportedURL` covers both "we don't support this domain" and "no provider matched" — do not introduce a separate `ErrNoProviderFound`.
 
@@ -64,6 +64,8 @@ These are easy to get wrong without reading multiple files together:
 
 11. **Keep-alive self-ping.** `Queue.active` is an atomic counter bumped on `Enqueue` and decremented when `Process` returns. `application.KeepAlive` runs as a goroutine from `main.go`; every 2 min it reads `queue.Active()` and, if non-zero, GETs `${MEDIABOT_PUBLIC_URL}/health`. The ping must traverse the Fly proxy (public URL, not localhost) to reset the auto-stop idle timer. Without this, a multi-minute yt-dlp download with no concurrent webhooks would have the VM stopped from under it.
 
+12. **Quality is never asked for — Best is the default.** `HandleURL` calls `SelectQuality(QualityBest)` itself and enqueues straight away; the "Fetching..." placeholder becomes that download's status message (`progressState.msgID`, with `progressState.header` keeping the title above every status line). The Good (MP3) tier is reachable only through `offerLowerQuality`, the one-button keyboard sent when a Best file busts the 50 MB cap — that retry is a *new* `Download` aggregate because the failed one is terminal. So the quality keyboard, the `pending` map and `HandleQualitySelection` are still live code, just off the happy path. If you ever make the default configurable, keep `SelectQuality` in the application layer — the domain must not know about defaults.
+
 ## Configuration
 
 All config via env (see Task 5):
@@ -75,7 +77,7 @@ All config via env (see Task 5):
 - `YTDLP_COOKIES_PATH` — optional; when set, passed as `--cookies` to both FetchInfo and Download (needed for some age-/region-restricted YouTube videos)
 - `MEDIABOT_TEMP_DIR` — default `os.TempDir()+"/mediabot"`
 - `MEDIABOT_MAX_CONCURRENT_DOWNLOADS` — default 3
-- `MEDIABOT_MAX_DURATION_MINUTES` — default 45. Videos longer than this are rejected right after `FetchInfo` with `MsgVideoTooLong`, before the quality keyboard is shown. Rationale: 45 min @ mp3 128k ≈ 42 MB still fits Telegram's 50 MB cap; longer audio almost always fails the send stage anyway, and for opus-source videos yt-dlp must transcode to m4a/mp3, which is multi-minute on a 512 MB shared-cpu VM and looks frozen to the user. `0` / unset / invalid all fall back to the 45 default (no "unlimited" mode on purpose).
+- `MEDIABOT_MAX_DURATION_MINUTES` — default 45. Videos longer than this are rejected right after `FetchInfo` with `MsgVideoTooLong`, before the download is queued. Rationale: 45 min @ mp3 128k ≈ 42 MB still fits Telegram's 50 MB cap; longer audio almost always fails the send stage anyway, and for opus-source videos yt-dlp must transcode to m4a/mp3, which is multi-minute on a 512 MB shared-cpu VM and looks frozen to the user. `0` / unset / invalid all fall back to the 45 default (no "unlimited" mode on purpose).
 - `MEDIABOT_ALLOWED_CHAT_IDS` — **required**, comma-separated chat IDs. Empty/unset = boot fails with `ErrEmptyAllowlist` (deny-all by design). Group chat IDs are negative. See "Allowlist runbook" below.
 
 ## Third-party libs
@@ -188,7 +190,7 @@ Rollback to always-on (if auto-stop ever causes grief): set `min_machines_runnin
 
 1. **Cold-start latency.** First Telegram message after idle takes ~5–10s while Fly boots the VM. Acceptable for this bot; if it grows, profile boot or bump the VM to a paid CPU tier.
 2. **No persistent volume.** In-flight downloads are lost on every redeploy. Auto-stop does NOT cut mid-download thanks to the keep-alive self-ping; users can re-send URLs after any unexpected restart.
-3. **Stale quality-keyboard callbacks.** If the VM auto-stops while a user is staring at the keyboard and they tap a button after the machine starts, the in-memory `pending` map is empty and the tap is silently dropped (logged as `callback stale`). Acceptable; user re-sends URL. Happens more often than with the always-on deploy — watch for user complaints.
+3. **Stale MP3-retry callbacks.** If the VM auto-stops while a user is staring at the MP3 retry keyboard and they tap the button after the machine starts, the in-memory `pending` map is empty and the tap is silently dropped (logged as `callback stale`). Acceptable; user re-sends URL. Rare now that the keyboard only appears for oversize files.
 4. **`GO_VERSION` build arg vs `go.mod`.** Both say `1.26`. If `go.mod` bumps, bump the arg in `.infra/prod/fly.toml` at the same time.
 5. **CI token rotation.** `FLY_API_TOKEN` in GitHub secrets is scoped to the current Fly app. If the app is ever destroyed/recreated, re-issue with `flyctl tokens create deploy -c .infra/prod/fly.toml -a "$FLY_APP"`, and update the `FLY_APP` / `MEDIABOT_PUBLIC_URL` repo secrets to match the new name.
 6. **App name is guessable from the repo name.** Keeping the name out of the repo only helps while the Fly app is not simply `tg-audio-bot`. If it still matches the repo slug, anyone can derive the `.fly.dev` hostname and wake the zero-scale VM by hitting `/health`. Rename the app to something unrelated if that matters.
