@@ -92,7 +92,12 @@ func main() {
 	keepAlive := application.NewKeepAlive(svc.Queue(), cfg.PublicURL, 0, logger)
 	go keepAlive.Run(ctx)
 
+	// cookies is logged because a missing YTDLP_COOKIES secret is fatal in
+	// practice, not degraded: from a datacenter IP YouTube serves no usable
+	// formats to an unauthenticated session, and yt-dlp only reports that as
+	// "Requested format is not available" per request.
 	slog.Info("media-bot starting",
+		"cookies", cfg.YtDlpCookiesPath != "",
 		"max_concurrent", cfg.MaxConcurrentDownload,
 		"max_duration_min", cfg.MaxDurationMinutes,
 		"temp_dir", cfg.TempDir,

@@ -41,20 +41,14 @@ func New(cfg Config) *Provider {
 
 func (p *Provider) ID() domain.ProviderID { return ProviderID }
 
-// playerClients pins yt-dlp's YouTube client order.
-//
-// yt-dlp picks its default clients based on whether cookies authenticate the
-// session. Unauthenticated it uses android_vr/visionos, which need no JS player
-// and still serve plain HTTPS audio formats. As soon as login cookies are
-// present it switches to the authed set (tv_downgraded, web_safari) — both of
-// which YouTube serves via SABR, so format selection intermittently dies with
-// "Requested format is not available". Because YTDLP_COOKIES is set in prod,
-// every request took that path.
-//
-// Listing the JS-free clients first keeps extraction working for ordinary
-// videos while `default` stays as a fallback for the age-restricted ones the
-// cookies were added for in the first place.
-const playerClients = "youtube:player_client=android_vr,visionos,default"
+// Do NOT pin `--extractor-args youtube:player_client=...` here. Pinning
+// android_vr,visionos,default looked right locally and broke production: from a
+// datacenter IP `android_vr` answers HTTP 403 without cookies, `tv` returns only
+// storyboards, and an unsupported client name (`visionos` in the pinned yt-dlp)
+// is skipped with a warning, not an error — so the effective list silently
+// shrinks. Probed on the VM: cookies plus yt-dlp's own client defaults is the
+// combination that serves plain HTTPS DASH formats. Cookies are therefore not
+// optional in prod, whatever the video's age rating.
 
 // hostRe matches the host portion of a YouTube URL. Kept deliberately simple:
 // we accept youtu.be, (www.|m.)?youtube.com, and youtube.com/shorts/...
@@ -69,7 +63,6 @@ func (p *Provider) MatchesURL(rawURL string) bool {
 func (p *Provider) FetchInfo(ctx context.Context, url string) (domain.MediaInfo, error) {
 	args := []string{
 		"--no-download",
-		"--extractor-args", playerClients,
 		"--print", "%(title)s",
 		"--print", "%(duration_string)s",
 	}
@@ -114,7 +107,6 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 	args := []string{
 		"--no-playlist",
 		"--newline",
-		"--extractor-args", playerClients,
 		"-x", // extract audio
 		"-o", outTmpl,
 	}
