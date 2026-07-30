@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,18 +26,48 @@ const ProviderID = domain.ProviderID("youtube")
 type Config struct {
 	YtDlpPath   string // e.g. "yt-dlp"; required
 	CookiesPath string // optional; passed as --cookies when non-empty
+	// Logger is optional; nil falls back to slog.Default(). The provider logs
+	// whether an extraction was captured and reused, which is the only way to
+	// tell from production logs that the reuse path is actually engaging.
+	Logger *slog.Logger
 }
 
 // Provider implements domain.Provider for YouTube audio downloads.
 type Provider struct {
-	cfg Config
+	cfg  Config
+	info *infoCache
+	log  *slog.Logger
 }
 
 func New(cfg Config) *Provider {
 	if cfg.YtDlpPath == "" {
 		cfg.YtDlpPath = "yt-dlp"
 	}
-	return &Provider{cfg: cfg}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Provider{cfg: cfg, info: newInfoCache(), log: logger}
+}
+
+// fetchInfoArgs builds FetchInfo's arguments. An empty infoOutTmpl means "do
+// not capture the extraction".
+//
+// --no-simulate is load-bearing and easy to lose: --print implies --simulate,
+// and simulate mode writes no files at all, so --write-info-json is accepted and
+// silently ignored. That made the whole reuse path a no-op in production while
+// every local run still looked fine, because a download works either way when
+// the second extraction is not being refused.
+func fetchInfoArgs(infoOutTmpl string) []string {
+	args := []string{
+		"--no-download",
+		"--print", "%(title)s",
+		"--print", "%(duration_string)s",
+	}
+	if infoOutTmpl != "" {
+		args = append(args, "--no-simulate", "--write-info-json", "-o", infoOutTmpl)
+	}
+	return args
 }
 
 func (p *Provider) ID() domain.ProviderID { return ProviderID }
@@ -61,11 +92,18 @@ func (p *Provider) MatchesURL(rawURL string) bool {
 // FetchInfo runs yt-dlp in no-download mode to get title and duration.
 // Output: two lines on stdout, one per --print flag.
 func (p *Provider) FetchInfo(ctx context.Context, url string) (domain.MediaInfo, error) {
-	args := []string{
-		"--no-download",
-		"--print", "%(title)s",
-		"--print", "%(duration_string)s",
+	// Keep this extraction on disk for Download to replay — see infocache.go.
+	// A failure here is not fatal: without the JSON, Download simply extracts
+	// again, which is the old behaviour.
+	infoDir, err := os.MkdirTemp("", "ytinfo-*")
+	var infoOutTmpl string
+	if err == nil {
+		infoOutTmpl = filepath.Join(infoDir, "info")
+	} else {
+		infoDir = ""
 	}
+
+	args := fetchInfoArgs(infoOutTmpl)
 	args = p.withCookies(args)
 	args = append(args, url)
 
@@ -74,7 +112,23 @@ func (p *Provider) FetchInfo(ctx context.Context, url string) (domain.MediaInfo,
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if infoDir != "" {
+			_ = os.RemoveAll(infoDir)
+		}
 		return domain.MediaInfo{}, fmt.Errorf("yt-dlp fetch info: %w: %s", err, lastLine(&stderr))
+	}
+	if infoDir != "" {
+		infoPath := filepath.Join(infoDir, "info.info.json")
+		if _, statErr := os.Stat(infoPath); statErr == nil {
+			p.info.put(url, infoDir, infoPath)
+			p.log.Info("ytdlp info captured", "url", url)
+		} else {
+			// Logged rather than ignored: a silent miss here is invisible until
+			// downloads start failing in an environment where the second
+			// extraction is refused.
+			p.log.Warn("ytdlp info not written", "url", url, "err", statErr)
+			_ = os.RemoveAll(infoDir)
+		}
 	}
 
 	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
@@ -133,7 +187,18 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 		return "", fmt.Errorf("unsupported quality: %v", opts.Quality)
 	}
 	args = p.withCookies(args)
-	args = append(args, opts.URL)
+
+	// Replay FetchInfo's extraction when we still have it: that removes the
+	// second Innertube API call per request, which is the one YouTube answers
+	// with 403 from a datacenter IP. Falls back to extracting from the URL.
+	if infoPath, infoDir := p.info.take(opts.URL); infoPath != "" {
+		defer func() { _ = os.RemoveAll(infoDir) }()
+		args = append(args, "--load-info-json", infoPath)
+		p.log.Info("ytdlp info reuse", "url", opts.URL, "hit", true)
+	} else {
+		args = append(args, opts.URL)
+		p.log.Info("ytdlp info reuse", "url", opts.URL, "hit", false)
+	}
 
 	cmd := exec.CommandContext(ctx, p.cfg.YtDlpPath, args...)
 	stderr, err := cmd.StderrPipe()

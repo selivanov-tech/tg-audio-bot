@@ -121,3 +121,26 @@ func TestFindOutputFile(t *testing.T) {
 		}
 	})
 }
+
+// Regression: --print implies --simulate, and simulate mode writes no files, so
+// --write-info-json without --no-simulate is silently ignored. That made the
+// info-reuse path a no-op that only production could reveal.
+func TestFetchInfoArgs_CaptureRequiresNoSimulate(t *testing.T) {
+	args := strings.Join(fetchInfoArgs("/tmp/ytinfo-x/info"), " ")
+	for _, want := range []string{"--write-info-json", "--no-simulate", "--no-download"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("capture args missing %s: %s", want, args)
+		}
+	}
+
+	// Without a template there is nothing to write, so neither flag belongs.
+	plain := strings.Join(fetchInfoArgs(""), " ")
+	for _, unwanted := range []string{"--write-info-json", "--no-simulate"} {
+		if strings.Contains(plain, unwanted) {
+			t.Errorf("non-capture args should not contain %s: %s", unwanted, plain)
+		}
+	}
+	if !strings.Contains(plain, "%(title)s") {
+		t.Errorf("title print missing: %s", plain)
+	}
+}

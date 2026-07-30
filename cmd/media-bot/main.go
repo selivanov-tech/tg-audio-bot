@@ -53,6 +53,7 @@ func main() {
 	registry.Register(youtube.New(youtube.Config{
 		YtDlpPath:   cfg.YtDlpPath,
 		CookiesPath: cfg.YtDlpCookiesPath,
+		Logger:      logger,
 	}))
 
 	// Build application with a nil messenger first, then attach the real
