@@ -37,6 +37,16 @@ type Config struct {
 	// X-Telegram-Bot-Api-Secret-Token header on each webhook POST. The
 	// Telegram adapter validates it and silently drops forged requests.
 	WebhookSecret string
+
+	// Cookie mirror (object storage). Names follow what `fly storage create`
+	// injects, so a provisioned Tigris bucket needs no extra wiring. An empty
+	// CookieBucket disables the mirror and the bot falls back to the
+	// YTDLP_COOKIES seed alone. Credentials are deliberately absent: the AWS
+	// SDK reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY itself.
+	CookieBucket  string // BUCKET_NAME
+	CookieObject  string // MEDIABOT_COOKIES_OBJECT, default "yt-cookies.txt"
+	S3EndpointURL string // AWS_ENDPOINT_URL_S3
+	S3Region      string // AWS_REGION, default "auto"
 }
 
 // ErrMissingToken is returned when TELEGRAM_BOT_TOKEN is unset.
@@ -88,6 +98,10 @@ func Load() (Config, error) {
 		AllowedChatIDs:        allowed,
 		PublicURL:             publicURL,
 		WebhookSecret:         webhookSecret,
+		CookieBucket:          strings.TrimSpace(os.Getenv("BUCKET_NAME")),
+		CookieObject:          envOrDefault("MEDIABOT_COOKIES_OBJECT", "yt-cookies.txt"),
+		S3EndpointURL:         strings.TrimSpace(os.Getenv("AWS_ENDPOINT_URL_S3")),
+		S3Region:              envOrDefault("AWS_REGION", "auto"),
 	}, nil
 }
 
