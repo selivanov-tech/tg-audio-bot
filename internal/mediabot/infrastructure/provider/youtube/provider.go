@@ -23,8 +23,8 @@ const ProviderID = domain.ProviderID("youtube")
 // Config is the provider's dependency surface. Wired in main.go from the
 // global Config (see infrastructure/config).
 type Config struct {
-	YtDlpPath    string // e.g. "yt-dlp"; required
-	CookiesPath  string // optional; passed as --cookies when non-empty
+	YtDlpPath   string // e.g. "yt-dlp"; required
+	CookiesPath string // optional; passed as --cookies when non-empty
 }
 
 // Provider implements domain.Provider for YouTube audio downloads.
@@ -180,15 +180,48 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 		return "", fmt.Errorf("%w: %s", domain.ErrDownloadFailed, lastLineStr(stderrTail.String()))
 	}
 
-	// yt-dlp's final extension depends on --audio-format; glob to find it.
-	matches, err := filepath.Glob(filepath.Join(opts.OutputDir, stem+".*"))
-	if err != nil || len(matches) == 0 {
+	// yt-dlp's final extension depends on --audio-format, so the file has to be
+	// discovered rather than computed.
+	return findOutputFile(opts.OutputDir, stem, opts.Quality)
+}
+
+// findOutputFile locates yt-dlp's output inside the per-download directory.
+//
+// It matches by prefix instead of globbing: titles routinely contain glob
+// metacharacters — "Artist - Track [Label]" is enough — and filepath.Glob reads
+// `[...]` as a character class, so the pattern silently matches nothing while
+// the file sits right there. That produced "output file not found" for a
+// download that had completely succeeded.
+//
+// When no name matches the prefix (yt-dlp truncates filenames that would exceed
+// the filesystem limit), every file in the directory is a candidate: the caller
+// creates a fresh temp dir per download, so anything in it belongs to this one.
+func findOutputFile(dir, stem string, q domain.Quality) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("%w: read output dir: %v", domain.ErrDownloadFailed, err)
+	}
+
+	var matches, all []string
+	prefix := stem + "."
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		full := filepath.Join(dir, e.Name())
+		all = append(all, full)
+		if strings.HasPrefix(e.Name(), prefix) {
+			matches = append(matches, full)
+		}
+	}
+	if len(matches) == 0 {
+		matches = all
+	}
+	if len(matches) == 0 {
 		return "", fmt.Errorf("%w: output file not found", domain.ErrDownloadFailed)
 	}
-	// Prefer the audio output (opus/mp3) over any intermediate files yt-dlp
-	// may have left behind.
-	preferred := preferAudioFile(matches, opts.Quality)
-	return preferred, nil
+	// Prefer the audio output over any intermediate files yt-dlp left behind.
+	return preferAudioFile(matches, q), nil
 }
 
 // --- helpers ---------------------------------------------------------------
