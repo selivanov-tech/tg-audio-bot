@@ -289,7 +289,8 @@ func TestBestAudioFormat_LowBitrateFallbacksComeLast(t *testing.T) {
 		"bestaudio[acodec^=mp4a.40.2]",
 		"bestaudio[format_id^=234]",
 		"bestaudio[abr>=96]",
-		"best[height<=480][acodec^=mp4a.40.2]",
+		"best[height<=360][acodec^=mp4a.40.2][asr>=?44100]",
+		"best[height<=480][acodec^=mp4a.40.2][asr>=?44100]",
 	}
 	poor := []string{"bestaudio[ext=m4a]", "bestaudio", "best[height<=480]", "best"}
 	for _, g := range good {

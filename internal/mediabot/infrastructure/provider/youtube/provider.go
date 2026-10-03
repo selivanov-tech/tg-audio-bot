@@ -287,18 +287,22 @@ func extractionWarnings(stderr string) string {
 //     select it; the prefix keeps language-suffixed variants.
 //  3. Any audio-only format of at least 96 kbps — in practice opus 251, which
 //     --audio-format m4a transcodes (see qualityArgs for the bitrate).
-//  4. A muxed AAC-LC stream at or under 480p. Some datacenter sessions get no
-//     audio-only formats at all: YouTube withholds the web clients' list and
-//     yt-dlp falls back to the "tv downgraded" client, whose whole menu is
-//     storyboards plus muxed video+audio. -x strips the video and the AAC
-//     track is copied. height<=480 bounds the throwaway video bytes, and the
-//     codec filter keeps out the ≤240p rungs, whose audio is HE-AAC.
+//  4. A muxed AAC-LC stream, smallest video first: 360p, then 480p. Some
+//     datacenter sessions get no audio-only formats at all — the authed
+//     clients come back SABR-only — and the menu shrinks to muxed video+audio:
+//     HLS 91-96 and format 18. -x strips the video and the AAC track is copied.
+//     The height cap bounds the throwaway video bytes. The codec filter keeps
+//     out 91/92, whose audio is HE-AAC, and asr>=?44100 keeps out a format 18
+//     that is labelled mp4a.40.2 but carries the 22 kHz HE-AAC core — seen in
+//     production, byte for byte the size of 139. HLS formats report no asr,
+//     hence the `?`; 93-96 carry the 140 track.
 //  5. Only then the low-bitrate leftovers: 139, any audio-only format, any
 //     muxed stream. A poor file still beats a failed download.
 const bestAudioFormat = "bestaudio[acodec^=mp4a.40.2]" +
 	"/bestaudio[format_id^=234]" +
 	"/bestaudio[abr>=96]" +
-	"/best[height<=480][acodec^=mp4a.40.2]" +
+	"/best[height<=360][acodec^=mp4a.40.2][asr>=?44100]" +
+	"/best[height<=480][acodec^=mp4a.40.2][asr>=?44100]" +
 	"/bestaudio[ext=m4a]/bestaudio/best[height<=480]/best"
 
 // qualityArgs returns the format and post-processing args for a quality tier.
