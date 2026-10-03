@@ -266,6 +266,75 @@ func extractionWarnings(stderr string) string {
 	return strings.Join(lines, " | ")
 }
 
+// bestAudioFormat is the Best tier's format selector: a ranked list, of which
+// yt-dlp takes the first alternative that matches anything.
+//
+// The output is m4a (AAC), not opus: Telegram classifies .opus as a voice
+// message and rejects it with VOICE_MESSAGES_FORBIDDEN when the recipient has
+// voice messages disabled.
+//
+//  1. AAC-LC audio-only (140, and its lower-ranked -drc twin). It remuxes
+//     into m4a without re-encoding — yt-dlp prints "Not converting audio" —
+//     which skips a multi-minute ffmpeg pass on the 512 MB VM. It is matched
+//     by codec, not by container: `[ext=m4a]` also matches 139, YouTube's
+//     48 kbps HE-AAC track (mp4a.40.5). From a datacenter IP 140 is sometimes
+//     missing (the SABR-only experiment makes yt-dlp skip the web clients'
+//     https formats), and a container-based selector then shipped 139 without
+//     a word: a 6-minute track arrived as 2 MiB of dull, narrow-sounding
+//     audio instead of 5.6 MiB.
+//  2. 234, the HLS audio-only AAC-LC stream (~128 kbps). yt-dlp reports its
+//     codec and bitrate as unknown and its ext as mp4, so only its id can
+//     select it; the prefix keeps language-suffixed variants.
+//  3. Any audio-only format of at least 96 kbps — in practice opus 251, which
+//     --audio-format m4a transcodes (see qualityArgs for the bitrate).
+//  4. A muxed AAC-LC stream at or under 480p. Some datacenter sessions get no
+//     audio-only formats at all: YouTube withholds the web clients' list and
+//     yt-dlp falls back to the "tv downgraded" client, whose whole menu is
+//     storyboards plus muxed video+audio. -x strips the video and the AAC
+//     track is copied. height<=480 bounds the throwaway video bytes, and the
+//     codec filter keeps out the ≤240p rungs, whose audio is HE-AAC.
+//  5. Only then the low-bitrate leftovers: 139, any audio-only format, any
+//     muxed stream. A poor file still beats a failed download.
+const bestAudioFormat = "bestaudio[acodec^=mp4a.40.2]" +
+	"/bestaudio[format_id^=234]" +
+	"/bestaudio[abr>=96]" +
+	"/best[height<=480][acodec^=mp4a.40.2]" +
+	"/bestaudio[ext=m4a]/bestaudio/best[height<=480]/best"
+
+// qualityArgs returns the format and post-processing args for a quality tier.
+//
+// Best passes --audio-quality 128K for the transcode path only: yt-dlp drops
+// quality args when it merely copies an AAC track. Without it, yt-dlp's
+// default VBR quality makes ffmpeg's AAC encoder land around 320 kbps — a
+// 6-minute opus source came out at 14.5 MB instead of 6 — and a 45-minute
+// track would no longer fit Telegram's 50 MB cap.
+func qualityArgs(q domain.Quality) ([]string, error) {
+	switch q {
+	case domain.QualityBest:
+		return []string{"-f", bestAudioFormat, "--audio-format", "m4a", "--audio-quality", "128K"}, nil
+	case domain.QualityGood:
+		return []string{"--audio-format", "mp3", "--audio-quality", "128K"}, nil
+	default:
+		return nil, fmt.Errorf("unsupported quality: %v", q)
+	}
+}
+
+// formatLineRe matches the line yt-dlp prints once format selection is done,
+// e.g. "[info] _9bw_VtMUGA: Downloading 1 format(s): 140". Merged selections
+// print ids joined with "+".
+var formatLineRe = regexp.MustCompile(`^\[info\] .+: Downloading \d+ format\(s\): (\S+)$`)
+
+// parseFormatLine extracts the chosen format id(s). Logging them is what makes
+// a quality drop visible in production: the id is the only place the choice
+// shows before the file size does.
+func parseFormatLine(line string) (string, bool) {
+	m := formatLineRe.FindStringSubmatch(strings.TrimSpace(line))
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
 // Download invokes yt-dlp with quality-specific args, streams stderr progress
 // lines to opts.OnProgress on every match, and returns the resulting file path.
 func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (string, error) {
@@ -285,40 +354,11 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 		"-x", // extract audio
 		"-o", outTmpl,
 	}
-	switch opts.Quality {
-	case domain.QualityBest:
-		// m4a (AAC), not opus: Telegram classifies .opus as a voice message
-		// and rejects with VOICE_MESSAGES_FORBIDDEN when the recipient has
-		// voice messages disabled.
-		//
-		// The format selector is what makes this extract-only. yt-dlp's
-		// default `bestaudio` prefers opus (equal bitrate, higher score), so
-		// `--audio-format m4a` alone always re-encodes opus → AAC — and with
-		// `--audio-quality 0` that re-encode lands around 400 kbps, ~3x the
-		// size of YouTube's own 129 kbps AAC track for no quality gain (a
-		// re-encode cannot add any). Naming the m4a track instead makes
-		// yt-dlp print "Not converting audio" and just remux, which also
-		// skips a multi-minute ffmpeg pass on the 512 MB VM. The
-		// `/bestaudio` fallback keeps the rare videos with no m4a track
-		// working; those still transcode.
-		//
-		// The muxed `/best...` fallbacks exist because a datacenter IP often
-		// gets no audio-only formats at all: YouTube withholds the web
-		// client's list and yt-dlp silently falls back to the "tv
-		// downgraded" client, whose whole menu is storyboards plus muxed
-		// video+audio streams — nothing `bestaudio` can ever match. -x
-		// strips the video after download, and the muxed AAC (mp4a) track
-		// remuxes into m4a without re-encoding, same as the audio-only
-		// path. height<=480 bounds the throwaway video bytes while staying
-		// above the ≤240p rungs, whose audio is the poorer HE-AAC
-		// (mp4a.40.5); bare /best is the last resort when nothing at or
-		// under 480p exists.
-		args = append(args, "-f", "bestaudio[ext=m4a]/bestaudio/best[height<=480]/best", "--audio-format", "m4a")
-	case domain.QualityGood:
-		args = append(args, "--audio-format", "mp3", "--audio-quality", "128K")
-	default:
-		return "", fmt.Errorf("unsupported quality: %v", opts.Quality)
+	qArgs, err := qualityArgs(opts.Quality)
+	if err != nil {
+		return "", err
 	}
+	args = append(args, qArgs...)
 	args = p.withCookies(args)
 
 	// Replay FetchInfo's extraction when we still have it: that removes the
@@ -361,6 +401,10 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 			if opts.OnProgress != nil {
 				opts.OnProgress(prog)
 			}
+			continue
+		}
+		if format, ok := parseFormatLine(line); ok {
+			p.log.Info("ytdlp format chosen", "url", opts.URL, "format", format)
 			continue
 		}
 		// After the download finishes, yt-dlp emits lines like

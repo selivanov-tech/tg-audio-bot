@@ -264,3 +264,97 @@ func TestExtractionWarnings(t *testing.T) {
 		}
 	})
 }
+
+// Regression: with 140 missing from a datacenter extraction, a container-based
+// selector (`bestaudio[ext=m4a]`) shipped 139, the 48 kbps HE-AAC track. Every
+// alternative that reaches 139 must come after every one that reaches a
+// ~128 kbps track.
+func TestBestAudioFormat_LowBitrateFallbacksComeLast(t *testing.T) {
+	alts := strings.Split(bestAudioFormat, "/")
+	index := func(alt string) int {
+		t.Helper()
+		for i, a := range alts {
+			if a == alt {
+				return i
+			}
+		}
+		t.Fatalf("alternative %q missing from %q", alt, bestAudioFormat)
+		return -1
+	}
+
+	if alts[0] != "bestaudio[acodec^=mp4a.40.2]" {
+		t.Errorf("first alternative = %q, want the AAC-LC audio-only track", alts[0])
+	}
+	good := []string{
+		"bestaudio[acodec^=mp4a.40.2]",
+		"bestaudio[format_id^=234]",
+		"bestaudio[abr>=96]",
+		"best[height<=480][acodec^=mp4a.40.2]",
+	}
+	poor := []string{"bestaudio[ext=m4a]", "bestaudio", "best[height<=480]", "best"}
+	for _, g := range good {
+		for _, p := range poor {
+			if index(g) > index(p) {
+				t.Errorf("%q comes after the low-bitrate fallback %q", g, p)
+			}
+		}
+	}
+}
+
+func TestQualityArgs(t *testing.T) {
+	t.Run("best caps the transcode bitrate", func(t *testing.T) {
+		// Without the cap an opus source re-encodes at ~320 kbps and long
+		// tracks bust Telegram's 50 MB limit.
+		args, err := qualityArgs(domain.QualityBest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Join(args, " ")
+		for _, want := range []string{"-f " + bestAudioFormat, "--audio-format m4a", "--audio-quality 128K"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("missing %q in %q", want, got)
+			}
+		}
+	})
+
+	t.Run("good is mp3 128k", func(t *testing.T) {
+		args, err := qualityArgs(domain.QualityGood)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(args, " "); got != "--audio-format mp3 --audio-quality 128K" {
+			t.Errorf("args = %q", got)
+		}
+	})
+
+	t.Run("unknown quality is an error", func(t *testing.T) {
+		if _, err := qualityArgs(domain.Quality(99)); err == nil {
+			t.Error("want an error")
+		}
+	})
+}
+
+func TestParseFormatLine(t *testing.T) {
+	cases := []struct {
+		name   string
+		line   string
+		want   string
+		wantOK bool
+	}{
+		{"single format", "[info] _9bw_VtMUGA: Downloading 1 format(s): 140", "140", true},
+		{"low-bitrate fallback", "[info] _9bw_VtMUGA: Downloading 1 format(s): 139", "139", true},
+		{"merged formats", "[info] abc: Downloading 1 format(s): 137+140", "137+140", true},
+		{"trailing CR", "[info] abc: Downloading 1 format(s): 251\r", "251", true},
+		{"progress line", "[download]  42.0% of    5.62MiB at  1.00MiB/s ETA 00:03", "", false},
+		{"other info line", "[info] Writing video metadata as JSON to: /tmp/x/info.info.json", "", false},
+		{"extract audio line", "[ExtractAudio] Destination: /tmp/x/track.m4a", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := parseFormatLine(c.line)
+			if got != c.want || ok != c.wantOK {
+				t.Errorf("parseFormatLine(%q) = (%q, %v), want (%q, %v)", c.line, got, ok, c.want, c.wantOK)
+			}
+		})
+	}
+}
