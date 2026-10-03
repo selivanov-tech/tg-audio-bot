@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -89,49 +90,34 @@ func (p *Provider) MatchesURL(rawURL string) bool {
 	return hostRe.MatchString(strings.TrimSpace(rawURL))
 }
 
+// extraction is one yt-dlp metadata pass: what it printed, plus the info JSON it
+// left on disk for Download to replay. An empty path means nothing was captured.
+type extraction struct {
+	stdout string
+	dir    string
+	path   string
+}
+
+// discardInfo drops the captured JSON but keeps the printed metadata. Downgrades
+// the run to "title and duration only", which is the behaviour from before the
+// info cache existed.
+func (e *extraction) discardInfo() {
+	if e.dir != "" {
+		_ = os.RemoveAll(e.dir)
+	}
+	e.dir, e.path = "", ""
+}
+
 // FetchInfo runs yt-dlp in no-download mode to get title and duration.
 // Output: two lines on stdout, one per --print flag.
 func (p *Provider) FetchInfo(ctx context.Context, url string) (domain.MediaInfo, error) {
-	// Keep this extraction on disk for Download to replay — see infocache.go.
-	// A failure here is not fatal: without the JSON, Download simply extracts
-	// again, which is the old behaviour.
-	infoDir, err := os.MkdirTemp("", "ytinfo-*")
-	var infoOutTmpl string
-	if err == nil {
-		infoOutTmpl = filepath.Join(infoDir, "info")
-	} else {
-		infoDir = ""
+	ex, err := p.extract(ctx, url)
+	if err != nil {
+		return domain.MediaInfo{}, err
 	}
+	ex = p.reextractIfNoAudio(ctx, url, ex)
 
-	args := fetchInfoArgs(infoOutTmpl)
-	args = p.withCookies(args)
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, p.cfg.YtDlpPath, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if infoDir != "" {
-			_ = os.RemoveAll(infoDir)
-		}
-		return domain.MediaInfo{}, fmt.Errorf("yt-dlp fetch info: %w: %s", err, lastLine(&stderr))
-	}
-	if infoDir != "" {
-		infoPath := filepath.Join(infoDir, "info.info.json")
-		if _, statErr := os.Stat(infoPath); statErr == nil {
-			p.info.put(url, infoDir, infoPath)
-			p.log.Info("ytdlp info captured", "url", url)
-		} else {
-			// Logged rather than ignored: a silent miss here is invisible until
-			// downloads start failing in an environment where the second
-			// extraction is refused.
-			p.log.Warn("ytdlp info not written", "url", url, "err", statErr)
-			_ = os.RemoveAll(infoDir)
-		}
-	}
-
-	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	lines := strings.Split(strings.TrimRight(ex.stdout, "\n"), "\n")
 	info := domain.MediaInfo{Provider: ProviderID}
 	if len(lines) > 0 {
 		info.Title = strings.TrimSpace(lines[0])
@@ -140,9 +126,144 @@ func (p *Provider) FetchInfo(ctx context.Context, url string) (domain.MediaInfo,
 		info.Duration = parseDurationString(strings.TrimSpace(lines[1]))
 	}
 	if info.Title == "" {
+		ex.discardInfo()
 		return domain.MediaInfo{}, fmt.Errorf("yt-dlp fetch info: empty title")
 	}
+
+	// Handing the entry over last means a rejected run never leaves a directory
+	// sitting in the cache until its TTL.
+	if ex.path != "" {
+		p.info.put(url, ex.dir, ex.path)
+		p.log.Info("ytdlp info captured", "url", url)
+	}
 	return info, nil
+}
+
+// extract runs one yt-dlp metadata pass, keeping the extraction on disk for
+// Download to replay — see infocache.go. Failing to capture it is not fatal:
+// without the JSON, Download simply extracts again.
+func (p *Provider) extract(ctx context.Context, url string) (extraction, error) {
+	var ex extraction
+	var outTmpl string
+	if dir, err := os.MkdirTemp("", "ytinfo-*"); err == nil {
+		ex.dir = dir
+		outTmpl = filepath.Join(dir, "info")
+	}
+
+	args := p.withCookies(fetchInfoArgs(outTmpl))
+	args = append(args, url)
+
+	cmd := exec.CommandContext(ctx, p.cfg.YtDlpPath, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		ex.discardInfo()
+		return extraction{}, fmt.Errorf("yt-dlp fetch info: %w: %s", err, lastLine(&stderr))
+	}
+	if warnings := extractionWarnings(stderr.String()); warnings != "" {
+		p.log.Warn("ytdlp extraction warnings", "url", url, "detail", warnings)
+	}
+
+	ex.stdout = stdout.String()
+	if ex.dir != "" {
+		infoPath := filepath.Join(ex.dir, "info.info.json")
+		if _, statErr := os.Stat(infoPath); statErr == nil {
+			ex.path = infoPath
+		} else {
+			// Logged rather than ignored: a silent miss here is invisible until
+			// downloads start failing in an environment where the second
+			// extraction is refused.
+			p.log.Warn("ytdlp info not written", "url", url, "err", statErr)
+			ex.discardInfo()
+		}
+	}
+	return ex, nil
+}
+
+// reextractIfNoAudio guards the cache against a degraded extraction.
+//
+// yt-dlp exits 0 and prints a correct title and duration even when the player
+// API handed it nothing downloadable — the metadata comes from the watch page,
+// the format list does not. Caching such a run is worse than not caching it at
+// all: --load-info-json skips extraction entirely, so Download fails on format
+// selection in about a second with no chance to recover.
+//
+// One retry is what fixes the first request after a zero-scale cold start. That
+// request runs against a cookie jar the machine loaded from the mirror hours
+// earlier; YouTube answers it with metadata only and rotates the session as a
+// side effect, so the immediate second extraction comes back complete. When the
+// retry is no better the JSON is dropped rather than cached, which leaves
+// Download to extract for itself — the pre-cache behaviour, and still the better
+// bet than replaying something known to be unusable.
+func (p *Provider) reextractIfNoAudio(ctx context.Context, url string, ex extraction) extraction {
+	if ex.path == "" || hasAudioFormat(ex.path) {
+		return ex
+	}
+	p.log.Warn("ytdlp info has no audio format, re-extracting", "url", url)
+	ex.discardInfo()
+
+	retry, err := p.extract(ctx, url)
+	if err != nil {
+		// Keep the first run: its title and duration are still good.
+		p.log.Warn("ytdlp re-extract failed", "url", url, "err", err)
+		return ex
+	}
+	if retry.path != "" && !hasAudioFormat(retry.path) {
+		p.log.Warn("ytdlp re-extract still has no audio format", "url", url)
+		retry.discardInfo()
+	}
+	return retry
+}
+
+// hasAudioFormat reports whether a captured extraction holds at least one
+// format carrying an audio track — audio-only for `bestaudio`, or muxed for the
+// `/best...` fallbacks; -x turns either into an audio file.
+//
+// A refused extraction leaves `formats` either empty or holding only storyboard
+// images, whose acodec is "none". Neither is distinguishable from a healthy
+// extraction by exit code, and both make Download fail with "Requested format
+// is not available".
+func hasAudioFormat(infoPath string) bool {
+	raw, err := os.ReadFile(infoPath)
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		Formats []struct {
+			ACodec string `json:"acodec"`
+		} `json:"formats"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return false
+	}
+	for _, f := range doc.Formats {
+		// Storyboards and video-only tracks write "none" explicitly; an
+		// absent acodec is unknown, and the safe reading of unknown is "no
+		// audio" — a false negative only costs one extra extraction.
+		if f.ACodec != "" && f.ACodec != "none" {
+			return true
+		}
+	}
+	return false
+}
+
+// extractionWarnings pulls yt-dlp's WARNING and ERROR lines out of a run that
+// still exited 0. They are the only record of *why* an extraction came back
+// degraded — skipped player clients, a missing PO token, SABR-only formats, a
+// 403 on the API page — and keeping stderr for the failure path alone is what
+// made the last such incident undiagnosable from production logs.
+func extractionWarnings(stderr string) string {
+	var lines []string
+	for _, l := range strings.Split(stderr, "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "WARNING:") || strings.HasPrefix(l, "ERROR:") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > stderrTailLines {
+		lines = lines[len(lines)-stderrTailLines:]
+	}
+	return strings.Join(lines, " | ")
 }
 
 // Download invokes yt-dlp with quality-specific args, streams stderr progress
@@ -180,7 +301,19 @@ func (p *Provider) Download(ctx context.Context, opts domain.DownloadOptions) (s
 		// skips a multi-minute ffmpeg pass on the 512 MB VM. The
 		// `/bestaudio` fallback keeps the rare videos with no m4a track
 		// working; those still transcode.
-		args = append(args, "-f", "bestaudio[ext=m4a]/bestaudio", "--audio-format", "m4a")
+		//
+		// The muxed `/best...` fallbacks exist because a datacenter IP often
+		// gets no audio-only formats at all: YouTube withholds the web
+		// client's list and yt-dlp silently falls back to the "tv
+		// downgraded" client, whose whole menu is storyboards plus muxed
+		// video+audio streams — nothing `bestaudio` can ever match. -x
+		// strips the video after download, and the muxed AAC (mp4a) track
+		// remuxes into m4a without re-encoding, same as the audio-only
+		// path. height<=480 bounds the throwaway video bytes while staying
+		// above the ≤240p rungs, whose audio is the poorer HE-AAC
+		// (mp4a.40.5); bare /best is the last resort when nothing at or
+		// under 480p exists.
+		args = append(args, "-f", "bestaudio[ext=m4a]/bestaudio/best[height<=480]/best", "--audio-format", "m4a")
 	case domain.QualityGood:
 		args = append(args, "--audio-format", "mp3", "--audio-quality", "128K")
 	default:

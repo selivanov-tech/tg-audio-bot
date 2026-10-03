@@ -144,3 +144,123 @@ func TestFetchInfoArgs_CaptureRequiresNoSimulate(t *testing.T) {
 		t.Errorf("title print missing: %s", plain)
 	}
 }
+
+// Regression: a degraded extraction exits 0 with a correct title but no formats,
+// and caching it made Download fail on format selection with no way to recover.
+func TestHasAudioFormat(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "info.info.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "audio-only m4a track present",
+			body: `{"formats":[{"format_id":"140","acodec":"mp4a.40.2","vcodec":"none"},
+			              {"format_id":"137","acodec":"none","vcodec":"avc1"}]}`,
+			want: true,
+		},
+		{
+			// What a healthy extraction looks like when YouTube offers no m4a:
+			// the /bestaudio fallback still matches, so this must pass.
+			name: "audio-only opus track present",
+			body: `{"formats":[{"format_id":"251","acodec":"opus","vcodec":"none"}]}`,
+			want: true,
+		},
+		{
+			// The observed cold-start failure: storyboards carry neither codec.
+			name: "storyboards only",
+			body: `{"formats":[{"format_id":"sb0","acodec":"none","vcodec":"none"},
+			              {"format_id":"sb1","acodec":"none","vcodec":"none"}]}`,
+			want: false,
+		},
+		{
+			name: "empty format list",
+			body: `{"formats":[]}`,
+			want: false,
+		},
+		{
+			name: "no formats key at all",
+			body: `{"title":"something"}`,
+			want: false,
+		},
+		{
+			// The tv-downgraded client's whole menu from a datacenter IP:
+			// muxed streams only. The /best fallbacks extract audio from
+			// these, so they must pass the gate.
+			name: "muxed formats only",
+			body: `{"formats":[{"format_id":"18","acodec":"mp4a.40.2","vcodec":"avc1"}]}`,
+			want: true,
+		},
+		{
+			name: "video-only formats only",
+			body: `{"formats":[{"format_id":"137","acodec":"none","vcodec":"avc1"}]}`,
+			want: false,
+		},
+		{
+			name: "malformed json",
+			body: `{"formats":`,
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := hasAudioFormat(write(t, c.body)); got != c.want {
+				t.Errorf("hasAudioFormat = %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		if hasAudioFormat(filepath.Join(t.TempDir(), "absent.json")) {
+			t.Error("want false for a file that does not exist")
+		}
+	})
+}
+
+// Regression: these lines only ever appear on a run that exits 0, so keeping
+// stderr for the failure path alone threw away the explanation of a degraded
+// extraction at exactly the moment it mattered.
+func TestExtractionWarnings(t *testing.T) {
+	t.Run("keeps warning and error lines, drops the rest", func(t *testing.T) {
+		got := extractionWarnings(strings.Join([]string{
+			"[youtube] Extracting URL: https://youtu.be/abc",
+			"WARNING: [youtube] abc: Some web client https formats have been skipped",
+			"[info] abc: Downloading 1 format(s): 140",
+			"ERROR: unable to download API page: HTTP Error 403: Forbidden",
+		}, "\n"))
+
+		for _, want := range []string{"Some web client https formats", "HTTP Error 403"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("missing %q in %q", want, got)
+			}
+		}
+		if strings.Contains(got, "Extracting URL") {
+			t.Errorf("informational line kept: %q", got)
+		}
+	})
+
+	t.Run("empty when nothing was flagged", func(t *testing.T) {
+		if got := extractionWarnings("[youtube] Extracting URL: x\n[info] done\n"); got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("caps the tail", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; i < stderrTailLines+3; i++ {
+			b.WriteString("WARNING: line\n")
+		}
+		if got := strings.Count(extractionWarnings(b.String()), "WARNING:"); got != stderrTailLines {
+			t.Errorf("kept %d lines, want %d", got, stderrTailLines)
+		}
+	})
+}
