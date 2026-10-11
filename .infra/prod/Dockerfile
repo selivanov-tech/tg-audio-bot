@@ -1,7 +1,14 @@
 # syntax=docker/dockerfile:1.7
 
 ARG GO_VERSION=1.26
-ARG YTDLP_VERSION=2026.07.04
+# A nightly, not a stable release: from the datacenter IP YouTube serves the
+# authed web_embedded client SABR-only, leaving format 18 alone (yt-dlp issue
+# 17666, whose 48 kbps HE-AAC track the bot then shipped). The nightly sends
+# that client a Safari UA, which brings back HLS formats 91-96 — 93-96 carry
+# the 140 AAC-LC track. Switch YTDLP_REPO back to yt-dlp/yt-dlp once a stable
+# release after 2026.08.19 includes commit c7fb478.
+ARG YTDLP_REPO=yt-dlp/yt-dlp-nightly-builds
+ARG YTDLP_VERSION=2026.09.27.232945
 ARG DENO_VERSION=v2.7.12
 
 # --- Stage 1: build the Go binary ---------------------------------------------
@@ -23,6 +30,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # --- Stage 2: runtime ---------------------------------------------------------
 FROM debian:bookworm-slim
 
+ARG YTDLP_REPO
 ARG YTDLP_VERSION
 ARG DENO_VERSION
 
@@ -43,7 +51,7 @@ RUN apt-get update \
         curl \
         unzip \
     && curl -fsSL -o /usr/local/bin/yt-dlp \
-        "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp" \
+        "https://github.com/${YTDLP_REPO}/releases/download/${YTDLP_VERSION}/yt-dlp" \
     && chmod +x /usr/local/bin/yt-dlp \
     && curl -fsSL -o /tmp/deno.zip \
         "https://github.com/denoland/deno/releases/download/${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \

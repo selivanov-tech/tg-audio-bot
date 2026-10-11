@@ -10,11 +10,22 @@
 
 set -e
 
-if [ -z "${YTDLP_COOKIES:-}" ]; then
+# Nothing to do when there is neither a seed secret nor a bucket to mirror
+# from: no path is exported, and the bot runs without cookies.
+if [ -z "${YTDLP_COOKIES:-}" ] && [ -z "${BUCKET_NAME:-}" ]; then
     return 0 2>/dev/null || exit 0
 fi
 
 cookies_path=/tmp/yt-cookies.txt
-printf '%s' "$YTDLP_COOKIES" | base64 -d > "$cookies_path"
+
+if [ -n "${YTDLP_COOKIES:-}" ]; then
+    printf '%s' "$YTDLP_COOKIES" | base64 -d > "$cookies_path"
+else
+    # Bucket-only mode: the file is replaced by the mirror's copy at startup,
+    # but it must already exist and be valid — yt-dlp aborts when --cookies
+    # points at a missing file, and a header-only jar is legal.
+    printf '# Netscape HTTP Cookie File\n' > "$cookies_path"
+fi
+
 chmod 600 "$cookies_path"
 export YTDLP_COOKIES_PATH="$cookies_path"

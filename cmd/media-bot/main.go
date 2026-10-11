@@ -18,6 +18,7 @@ import (
 	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/application/port"
 	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/domain"
 	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/infrastructure/config"
+	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/infrastructure/cookiestore"
 	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/infrastructure/provider/youtube"
 	"github.com/selivanov-tech/tg-audio-bot/internal/mediabot/infrastructure/telegram"
 )
@@ -41,11 +42,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Cookie mirror. Must run before the first download: yt-dlp rewrites the
+	// cookie jar as YouTube rotates it, and /tmp does not survive a restart, so
+	// the bucket copy is the current one and the YTDLP_COOKIES secret is only a
+	// seed for the very first boot.
+	startCookieMirror(ctx, cfg, logger)
+
 	// --- adapters -----------------------------------------------------------
 	registry := domain.NewProviderRegistry()
 	registry.Register(youtube.New(youtube.Config{
 		YtDlpPath:   cfg.YtDlpPath,
 		CookiesPath: cfg.YtDlpCookiesPath,
+		Logger:      logger,
 	}))
 
 	// Build application with a nil messenger first, then attach the real
@@ -148,6 +156,48 @@ func startHTTPServer(webhookHandler http.Handler) *http.Server {
 	}()
 
 	return srv
+}
+
+// startCookieMirror loads the cookie file from object storage and keeps the
+// bucket copy current in the background. Every failure here is non-fatal: the
+// bot still runs on whatever cookies the entrypoint seeded, it just loses the
+// ability to persist YouTube's rotations across restarts.
+func startCookieMirror(ctx context.Context, cfg config.Config, logger *slog.Logger) {
+	if cfg.CookieBucket == "" || cfg.YtDlpCookiesPath == "" {
+		slog.Info("cookie mirror disabled",
+			"bucket_set", cfg.CookieBucket != "",
+			"cookies_path_set", cfg.YtDlpCookiesPath != "")
+		return
+	}
+
+	store, err := cookiestore.New(ctx, cookiestore.Config{
+		Bucket:   cfg.CookieBucket,
+		Key:      cfg.CookieObject,
+		Endpoint: cfg.S3EndpointURL,
+		Region:   cfg.S3Region,
+		Path:     cfg.YtDlpCookiesPath,
+	}, logger)
+	if err != nil {
+		slog.Error("cookie mirror unavailable", "err", err)
+		return
+	}
+
+	loadCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	switch err := store.Load(loadCtx); {
+	case errors.Is(err, cookiestore.ErrNoObject):
+		// First boot with a fresh bucket: the seed becomes the first upload.
+		slog.Info("cookie mirror empty, seeding from secret", "bucket", cfg.CookieBucket)
+		if err := store.Save(loadCtx); err != nil {
+			slog.Error("cookie mirror seed failed", "err", err)
+		}
+	case err != nil:
+		slog.Error("cookie mirror load failed", "err", err)
+	default:
+		slog.Info("cookie mirror loaded", "bucket", cfg.CookieBucket, "key", cfg.CookieObject)
+	}
+
+	go store.Run(ctx, time.Minute)
 }
 
 // lazyHandler defers resolution of the real *Handler until the first update

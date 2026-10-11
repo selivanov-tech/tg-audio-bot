@@ -148,7 +148,7 @@ func (t *Bot) SendAudio(ctx context.Context, chatID int64, filePath, title strin
 	if err != nil {
 		return fmt.Errorf("open audio: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	_, err = t.b.SendAudio(ctx, &tgbot.SendAudioParams{
 		ChatID: chatID,

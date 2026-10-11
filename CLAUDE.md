@@ -50,7 +50,7 @@ These are easy to get wrong without reading multiple files together:
 
 4. **`Download` is a state machine.** States: `AwaitingQuality → Queued → Downloading → Sending → Complete` (or `Failed`). Transitions go through `MarkQueued()`, `MarkDownloading()`, etc., which return `ErrInvalidState` on illegal moves. Don't mutate state fields directly.
 
-5. **Telegram 50MB file limit is a hard constraint.** The service checks file size after download; when a Best (M4A/AAC) file exceeds the limit it shows the size error and then `offerLowerQuality` — the MP3 retry keyboard (see point 12). This is a default-Bot-API assumption; a local Bot API server would lift it to 2GB (out of scope). Note: we deliberately do NOT use opus — Telegram classifies `.opus` uploads as voice messages, which some users block via privacy settings (`VOICE_MESSAGES_FORBIDDEN`). Best therefore asks for YouTube's native AAC track by selector (`-f bestaudio[ext=m4a]/bestaudio`) and passes no `--audio-quality`: without the selector yt-dlp picks opus and re-encodes it to AAC at ~400 kbps, which triples the file (a 4:27 track went 4.3 MB → 12.7 MB) and moves the 50 MB cap from ~45 min of audio down to ~17. Don't "simplify" the selector away.
+5. **Telegram 50MB file limit is a hard constraint.** The service checks file size after download; when a Best (M4A/AAC) file exceeds the limit it shows the size error and then `offerLowerQuality` — the MP3 retry keyboard (see point 12). This is a default-Bot-API assumption; a local Bot API server would lift it to 2GB (out of scope). Note: we deliberately do NOT use opus — Telegram classifies `.opus` uploads as voice messages, which some users block via privacy settings (`VOICE_MESSAGES_FORBIDDEN`). Best therefore asks for YouTube's native AAC-LC track by codec (`bestAudioFormat` in `provider/youtube/provider.go`): 140, then the HLS stream 234, then any audio of at least 96 kbps (opus 251, transcoded), then a muxed AAC-LC stream (360p, then 480p — in practice HLS 93/94, which carry the 140 track), and only then the 48 kbps HE-AAC track 139 and other leftovers. The muxed step also requires `asr>=?44100`: format 18 can be labelled `mp4a.40.2` while carrying the 22 kHz HE-AAC core, and from Fly with cookies it was at one point the only format left (yt-dlp issue 17666 — the reason the Dockerfile pins a yt-dlp nightly). Select by codec, not by container: `[ext=m4a]` also matches 139, and from Fly's datacenter IP 140 is sometimes missing (SABR-only experiment), so `bestaudio[ext=m4a]` silently shipped 139 — a 6-minute track as 2 MiB of dull, narrow-sounding audio. Best also passes `--audio-quality 128K`; yt-dlp ignores it when it copies AAC, but without it an opus transcode lands at ~320 kbps (a 6:04 track went 6 MB → 14.5 MB), which moves the 50 MB cap from ~45 min of audio down to ~17. The download logs `ytdlp format chosen format=<id>`; a `139` there explains a quality complaint before anyone opens the file. Don't "simplify" the selector away.
 
 6. **Domain errors are exhaustive.** `ErrUnsupportedURL` covers both "we don't support this domain" and "no provider matched" — do not introduce a separate `ErrNoProviderFound`.
 
@@ -74,7 +74,9 @@ All config via env (see Task 5):
 - `TELEGRAM_WEBHOOK_SECRET` — **required**. Random string Telegram echoes back in the `X-Telegram-Bot-Api-Secret-Token` header on every webhook POST; the Telegram adapter silently drops mismatches. Generate once with `openssl rand -hex 32`. Empty/unset = boot fails with `ErrMissingWebhookSecret`.
 - `MEDIABOT_PUBLIC_URL` — **required**. Externally reachable base URL, no trailing slash (prod: `https://<fly-app>.fly.dev`, set as a Fly secret — deliberately not in `fly.toml`). Used for two things: (1) webhook registration with Telegram at `${PublicURL}/webhook` on every boot; (2) keep-alive self-ping at `${PublicURL}/health` while any download is active, so the request traverses Fly's proxy and resets the auto-stop idle timer. Localhost would bypass the proxy and not count. Empty/unset = boot fails with `ErrMissingPublicURL`.
 - `YTDLP_PATH` — default `yt-dlp`
-- `YTDLP_COOKIES_PATH` — optional; when set, passed as `--cookies` to both FetchInfo and Download (needed for some age-/region-restricted YouTube videos)
+- `YTDLP_COOKIES_PATH` — optional; when set, passed as `--cookies` to both FetchInfo and Download. **In prod this is effectively required, not optional**: from Fly's datacenter IP an unauthenticated YouTube session gets no usable formats at all (403 on the Innertube API → "Only images are available"), whatever the video's age rating. Set by `01-cookies.sh` at boot.
+- `BUCKET_NAME`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` — injected by `fly storage create` (Tigris). Enable the cookie mirror; see "Cookie mirror" below. Empty `BUCKET_NAME` disables it and the bot falls back to the seed secret alone.
+- `MEDIABOT_COOKIES_OBJECT` — object key for the mirrored cookie file, default `yt-cookies.txt`
 - `MEDIABOT_TEMP_DIR` — default `os.TempDir()+"/mediabot"`
 - `MEDIABOT_MAX_CONCURRENT_DOWNLOADS` — default 3
 - `MEDIABOT_MAX_DURATION_MINUTES` — default 45. Videos longer than this are rejected right after `FetchInfo` with `MsgVideoTooLong`, before the download is queued. Rationale: 45 min @ mp3 128k ≈ 42 MB still fits Telegram's 50 MB cap; longer audio almost always fails the send stage anyway, and for opus-source videos yt-dlp must transcode to m4a/mp3, which is multi-minute on a 512 MB shared-cpu VM and looks frozen to the user. `0` / unset / invalid all fall back to the 45 default (no "unlimited" mode on purpose).
@@ -89,7 +91,7 @@ All config via env (see Task 5):
 
 Production runs on Fly.io:
 
-- `.infra/prod/Dockerfile` — two-stage build. `golang:1.26-bookworm` → `debian:bookworm-slim` with `ffmpeg`, `python3`, and a pinned `yt-dlp` binary (ARG `YTDLP_VERSION`). Bump the version arg when yt-dlp breaks on YouTube changes.
+- `.infra/prod/Dockerfile` — two-stage build. `golang:1.26-bookworm` → `debian:bookworm-slim` with `ffmpeg`, `python3`, and a pinned `yt-dlp` binary (ARGs `YTDLP_REPO` + `YTDLP_VERSION`). Bump the version arg when yt-dlp breaks on YouTube changes. It currently pins a nightly from `yt-dlp/yt-dlp-nightly-builds`, because only nightlies after 2026.08.19 give the authed `web_embedded` client the HLS 91-96 formats; switch `YTDLP_REPO` back to `yt-dlp/yt-dlp` once a stable release includes that fix.
 - `.infra/prod/fly.toml` — region `fra`, 512MB shared-cpu-1x. Carries **no `app` key** on purpose (see "Project status"); flyctl takes the name from `-a` / `$FLY_APP` and prefers it over anything in the file. **Zero-scale**: `auto_stop_machines = 'stop'`, `auto_start_machines = true`, `min_machines_running = 0`. The Fly proxy buffers the first Telegram webhook POST after idle, cold-starts the VM (~5–10s), and forwards the request. Between active sessions the machine is stopped and billing pauses.
 - `.infra/prod/fly/entrypoint.sh` — **sources** every `/opt/fly/scripts/*.sh` hook (so hooks can export env vars that reach `media-bot`), then execs the binary. Drop shell scripts into `.infra/prod/fly/scripts/` to extend; see the cookies runbook below for an example.
 - `.github/workflows/deploy.yml` — manual `workflow_dispatch` only. Runs `go vet` + `golangci-lint` + `go test ./internal/mediabot/...` before `flyctl deploy`, then smoke-checks `/health`.
@@ -99,12 +101,32 @@ Paths in `[build]` (`dockerfile`, `ignorefile`) are relative to `fly.toml`'s dir
 
 Fly config is always outside the default location, so every `flyctl` command needs `-c .infra/prod/fly.toml`. And because `fly.toml` has no `app` key, every command also needs `-a <app>` — flyctl cannot infer the name. Either pass it explicitly or `export FLY_APP=<app>` for the shell session. The Makefile targets do this for you and fail fast when `FLY_APP` is unset.
 
+### Cookie mirror (Tigris object storage)
+
+**The problem it solves.** YouTube rotates account cookies, and yt-dlp writes the refreshed jar back to the file it was given (verified: a 2-line file came back with 12 lines and yt-dlp's own `# This file is generated by yt-dlp` header). The file lives on tmpfs and `01-cookies.sh` re-creates it from the `YTDLP_COOKIES` secret at every boot — and with zero-scale, boots are frequent. So every refresh was discarded and the seed snapshot aged until YouTube answered `The provided YouTube account cookies are no longer valid`, which surfaces to users only as `Requested format is not available`.
+
+`internal/mediabot/infrastructure/cookiestore` closes the loop: load the jar from the bucket at boot, upload it whenever the local file changes, and once more on SIGINT (which Fly sends before stopping the machine). The secret becomes a one-time seed.
+
+Provision once — Fly stages all five `AWS_*`/`BUCKET_NAME` secrets itself:
+```sh
+flyctl storage create -a "$FLY_APP"     # private Tigris bucket, credentials scoped to it
+make deploy
+```
+
+Boot logs tell you which path was taken: `cookie mirror loaded` (bucket copy in use), `cookie mirror empty, seeding from secret` (first boot with a fresh bucket), `cookie mirror disabled` (no `BUCKET_NAME`), or a `cookie mirror … failed` error. Every failure is non-fatal by design — the bot keeps running on the seeded file, it just stops persisting rotations.
+
+Notes and limits:
+- The bucket must stay **private** — these are live account session cookies.
+- Uploads are mtime+size triggered, polled once a minute, and never re-upload a jar that was just downloaded.
+- Single machine today, so no write races. If concurrency ever goes above one machine, two of them will clobber each other's jar.
+- Path-style addressing is used (`endpoint/bucket/key`); Tigris accepts both styles.
+
 ### Cookies runbook (yt-dlp)
 
-Cookies are needed for age- or region-restricted YouTube videos. Plumbing:
+Cookies are needed for age- or region-restricted YouTube videos — and in prod for *every* video (see `YTDLP_COOKIES_PATH` above). Plumbing:
 
-- `.infra/prod/fly/scripts/01-cookies.sh` — sourced by `entrypoint.sh` at boot. If `YTDLP_COOKIES` env is set, it base64-decodes the value to `/tmp/yt-cookies.txt` (mode 600) and exports `YTDLP_COOKIES_PATH`. No-op when the secret is unset, so the bot runs fine without cookies.
-- Path is tmpfs — re-materialized on every boot from the Fly secret. No volume needed.
+- `.infra/prod/fly/scripts/01-cookies.sh` — sourced by `entrypoint.sh` at boot. With `YTDLP_COOKIES` set it base64-decodes the value to `/tmp/yt-cookies.txt` (mode 600) and exports `YTDLP_COOKIES_PATH`. With only `BUCKET_NAME` set it writes a header-only jar to that same path instead — yt-dlp aborts when `--cookies` points at a missing file, and the mirror replaces the placeholder moments later. It is a no-op only when both are unset.
+- Path is tmpfs. The durable copy lives in the Tigris bucket (see "Cookie mirror"), so no volume is needed.
 
 Enable:
 ```sh
