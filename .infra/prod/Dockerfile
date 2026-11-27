@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 
 ARG GO_VERSION=1.26
-# A nightly, not a stable release: from the datacenter IP YouTube serves the
-# authed web_embedded client SABR-only, leaving format 18 alone (yt-dlp issue
-# 17666, whose 48 kbps HE-AAC track the bot then shipped). The nightly sends
-# that client a Safari UA, which brings back HLS formats 91-96 — 93-96 carry
-# the 140 AAC-LC track. Switch YTDLP_REPO back to yt-dlp/yt-dlp once a stable
-# release after 2026.08.19 includes commit c7fb478.
-ARG YTDLP_REPO=yt-dlp/yt-dlp-nightly-builds
-ARG YTDLP_VERSION=2026.09.27.232945
+# Stable release 2026.11.23 includes commit c7fb478: from the datacenter IP
+# YouTube serves the authed web_embedded client SABR-only, leaving format 18
+# alone (yt-dlp issue 17666, whose 48 kbps HE-AAC track the bot then shipped).
+# That commit sends the client a Safari UA, which brings back HLS formats 91-96
+# — 93-96 carry the 140 AAC-LC track. The old nightly pin (2026.09.27) stopped
+# solving YouTube's signature/n challenges after a player change.
+ARG YTDLP_REPO=yt-dlp/yt-dlp
+ARG YTDLP_VERSION=2026.11.23
 ARG DENO_VERSION=v2.7.12
 
 # --- Stage 1: build the Go binary ---------------------------------------------
